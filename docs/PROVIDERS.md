@@ -59,3 +59,9 @@ allowlists are rejected. No restriction silently becomes a broader permission.
 Both installed adapters passed genuine streamed marker turns during verification.
 The Claude marker used an empty tool list. Native availability checks, mock-stream
 tests, and live marker tests are reported separately.
+
+Structured graph schemas target draft-7 because the installed Claude SDK rejects
+the newer Zod default dialect. The planner allows six bounded SDK turns per
+request for structured output, with at most two requests and no execution tools.
+The live preview verifier and Codex workflow verifier are documented in
+[TESTING.md](TESTING.md).

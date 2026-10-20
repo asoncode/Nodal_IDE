@@ -239,11 +239,11 @@ export class NodalService {
     this.store.project(projectId);
     const controller = new AbortController(); this.generation.add(controller);
     const cwd = join(this.dataDir, 'planner'); await mkdir(cwd, { recursive: true, mode: 0o700 });
-    const schema = z.toJSONSchema(GraphSchema, { unrepresentable: 'any' });
+    const schema = z.toJSONSchema(GraphSchema, { unrepresentable: 'any', target: 'draft-7' });
     let instruction = `Return ONLY JSON matching this schema: ${JSON.stringify(schema)}. Build a Nodal workflow, never execute commands or modify files. Preserve unrelated nodes and positions. Exactly one start, reachable end, ordinary DAG, bounded quality_gate fail loop edges only. Use explicit command approvals and read-only provider permissions by default. Current graph: ${JSON.stringify(current)}\nUser request: ${prompt}`;
     try {
       for (let attempt = 1; attempt <= 2; attempt++) {
-        const response = await runProvider({ provider, prompt: instruction, cwd, permissionMode: 'read-only', signal: controller.signal, timeoutMs: 120000, noTools: true, outputSchema: schema, maxTurns: 2 });
+        const response = await runProvider({ provider, prompt: instruction, cwd, permissionMode: 'read-only', signal: controller.signal, timeoutMs: 120000, noTools: true, outputSchema: schema, maxTurns: 6 });
         try {
           const text = response.output.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
           const parsed: unknown = JSON.parse(text); const check = validateGraph(parsed);

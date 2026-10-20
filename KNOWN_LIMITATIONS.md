@@ -12,7 +12,7 @@ Nodal implements a functional local MVP. The following specification items remai
 
 ## Providers and trust
 
-- Both SDKs passed short genuine read-only streaming turns. Automated tests use explicitly mocked SDK events; complex live multi-agent feature building, long-lived resume, cancellation of all SDK-owned grandchildren, and provider upgrades need additional live validation.
+- Both SDKs passed genuine read-only streaming turns. A real Codex edit→test→quality→approval→integration workflow and tool-free Claude graph preview also passed. Automated provider tests use explicitly mocked SDK events; complex multi-agent feature building, long-lived resume, cancellation of all SDK-owned grandchildren, and provider upgrades need additional live validation.
 - Claude exposes scoped Read, plus Edit/Write for edit permission. Native Glob/Grep, shell, subagents, skills, plugins, and network tools are disabled. The runtime supplies a file-path manifest (first 500 files) so a file-only agent can discover source files. It cannot perform native recursive search.
 - Claude supports tool-free graph planning with structured output. Codex planning is rejected because the SDK cannot enforce a tool-free turn. Custom Codex tool allowlists are rejected. Its read-only sandbox may have wider native read access than the worktree.
 - Codex disables hooks, plugins, multi-agent tools, notifications, discovered MCP servers, extra writable roots, network access, and web search for each run. An unreadable/unrecognized MCP configuration fails closed. This is native provider policy, not a reviewed hardened isolation boundary.

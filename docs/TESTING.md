@@ -2,7 +2,7 @@
 
 ## Automated checks
 
-`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 71 unit/integration/UI cases across six files.
+`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 73 unit/integration/UI cases across seven files.
 
 Coverage includes deterministic predicate evaluation, graph validation and templates, topological readiness, skipped branches, parallel concurrency, all join policies, retry readiness races, bounded loops with feedback evidence, iteration limits, cancellation during delayed retries, pause/resume boundaries, node/run timeout, approvals, journal failures, and interruption recovery.
 
@@ -20,7 +20,11 @@ The flow opens a repository, adds a human-approval node, moves it with the keybo
 
 ## Live SDK checks
 
-Both `pnpm verify:provider codex --live .nodal/example-project` and `pnpm verify:provider claude --live .nodal/example-project` passed with genuine streamed SDK events and final marker responses in the development environment. Claude's tool set was empty; Codex ran read-only with network/search and extra integration tools disabled. Each returned the required marker. This is evidence for the basic SDK path only; longer coding, provider cancellation, spending, and filesystem sandbox guarantees need separate validation.
+Both `pnpm verify:provider codex --live .nodal/example-project` and `pnpm verify:provider claude --live .nodal/example-project` passed with genuine streamed SDK events and final marker responses in the development environment. Claude's tool set was empty; Codex ran read-only with network/search and extra integration tools disabled. Each returned the required marker. A genuine Codex workflow also fixed the disposable sample's `add.js` in an isolated worktree, passed real tests and the quality gate, blocked on a human gate, exposed the diff, and integrated only after explicit approval. Reproduce with `pnpm exec tsx scripts/verify-live-workflow.ts --live`.
+
+Live Claude graph generation returned a validated preview without applying or executing it. Reproduce with `pnpm exec tsx scripts/verify-graph-generation.ts --live`. Planner schemas explicitly target JSON Schema draft-7, which the installed Claude SDK requires. Planning has two bounded requests, up to six SDK turns per request, and a two-minute per-request timeout.
+
+These checks verify the exercised paths. Long-running reliability, provider cancellation, spending ceilings, and filesystem sandbox guarantees still need separate validation.
 
 Automated provider tests use explicit SDK mocks. No mock status is shown as a real provider connection. Models are not fixed in application code; defaults come from the SDK configuration.
 

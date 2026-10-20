@@ -99,7 +99,7 @@ pnpm verify:provider codex --live /absolute/path/to/repository
 pnpm verify:provider claude --live /absolute/path/to/repository
 ```
 
-Both adapters were verified with genuine streamed marker turns in this environment. That confirms the installed SDK/authentication path, not broad provider reliability or sandbox certification. Missing dollar telemetry remains unavailable.
+Both adapters were verified with genuine streamed marker turns. A live Codex coding/test/approval/integration workflow and a live tool-free Claude graph preview also passed in disposable repositories. Reproducible opt-in scripts are listed in [docs/TESTING.md](docs/TESTING.md). That confirms the installed SDK/authentication path, not broad provider reliability or sandbox certification. Missing dollar telemetry remains unavailable.
 
 ## Local data and security
 
