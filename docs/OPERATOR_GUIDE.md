@@ -8,7 +8,9 @@ Use Stop to terminate active sessions and prevent further scheduling. Pause only
 
 ## Repositories and worktrees
 
-Open the exact Git repository root and ensure it has an initial commit. Each attempt starts from captured committed content. Nodal keeps main-working-tree edits separate and refuses to integrate into a dirty destination. Review/commit or stash your changes using your normal Git tools before integration.
+Use **File → Open Folder…** in the desktop app to select any existing folder. **File → New Window** opens an independent empty workspace; windows share durable project and run history. Opening another folder or closing a window asks before discarding unsaved file or workflow edits. Browser mode uses the Explorer folder button and a full path instead of the native picker.
+
+For workflows, open the exact Git repository root and ensure it has an initial commit. Ordinary folders can still be browsed and edited without initializing Git. Each attempt starts from captured committed content. Nodal keeps main-working-tree edits separate and refuses to integrate into a dirty destination. Review/commit or stash your changes using your normal Git tools before integration.
 
 Each attempt's node inspector contains its worktree path and source commit. Use a separate editor or Git tools at that path when resolving conflicts. Conflicted automatic integration is aborted and both branches remain. No remote push is performed.
 

@@ -41,7 +41,7 @@ try {
   await browse('console','--clear');
   await browse('goto',`http://127.0.0.1:5174/?test=${Date.now()}#token=${runtime.token}&port=${new URL(runtime.url).port}`);
   await eventually(async()=> (await browse('text')).includes('Local runtime connected'),'Runtime bootstrap failed',40000);
-  await browse('click','.sidebar-project button');
+  await browse('click','.view-title button[aria-label="Open Folder"]');
   await browse('wait','[role="dialog"]');
   await browse('fill','input[placeholder="/Users/you/projects/my-app"]',repo);
   await eventually(async()=> (await browse('js','document.querySelector(".dialog-actions .primary")?.disabled')).trim() === 'false','Repository submit stayed disabled');
@@ -50,11 +50,12 @@ try {
   const project=store.projects()[0]; assert(project);
   console.log('PASS open repository and inspect files');
 
+  await browse('click','button[aria-label="Workflows"]');
   await browse('click','.sidebar-item:has-text("Local command")');
   await browse('click','.react-flow__node[data-id="command"]');
   await browse('fill','label.field:has-text("Name") input','Approved version check');
   await browse('fill','label.field:has-text("Executable") input',process.execPath);
-  await browse('click','button:has-text("Add node")');
+  await browse('click','button[aria-label="Add node"]');
   await browse('click','.palette-options button:has-text("Human approval")');
   await browse('fill','label.field:has-text("Name") input','Review command evidence');
   const ids = JSON.parse(await browse('js','Array.from(document.querySelectorAll(".react-flow__node")).map(node=>node.getAttribute("data-id"))')) as string[];
@@ -68,7 +69,7 @@ try {
   await browse('click',`.react-flow__handle.target[data-nodeid="${approvalId}"]`);
   await browse('click',`.react-flow__handle.source[data-nodeid="${approvalId}"]`);
   await browse('click','.react-flow__handle.target[data-nodeid="end"]');
-  await browse('click','.command-actions button:has-text("Save")');
+  await browse('click','.command-actions button[aria-label="Save"]');
   await eventually(async()=>store.graphs(project.id).length===1,'Graph was not persisted');
   assert.equal(store.graphs(project.id)[0].nodes.find(n=>n.id==='command')?.label,'Approved version check');
   assert.equal(store.graphs(project.id)[0].nodes.length,4); assert.equal(store.graphs(project.id)[0].edges.length,3);
@@ -79,34 +80,35 @@ try {
   await eventually(async()=>store.runs(project.id).length===1,'Run did not start');
   const runId=store.runs(project.id)[0].id;
   await eventually(async()=>store.approvals(runId).some(a=>a.decision==='pending'),'Command permission was not durable');
-  await browse('click','.dock-tabs button:has-text("Approvals")');
+  await browse('click','.panel-tabs button:has-text("Approvals")');
   await eventually(async()=> (await browse('text')).includes('not an OS sandbox'),'Command trust boundary not visible');
   await browse('click','.approval-item .primary');
   await eventually(async()=>store.approvals(runId).some(a=>a.nodeId===approvalId && a.decision==='pending'),'Human gate did not block durably');
   await eventually(async()=> (await browse('text')).includes('Review the results before continuing'),'Human gate not visible');
   await browse('click','.approval-item .primary');
   await eventually(async()=>store.run(runId).status==='succeeded','Approved command and human gate did not complete');
-  await browse('click','.dock-tabs button:has-text("Node console")');
+  await browse('click','.panel-tabs button:has-text("Console")');
   await eventually(async()=> (await browse('text')).includes(process.version),'Real command output not visible');
   assert(store.events(runId).some(e=>e.kind==='command.output'));
   console.log('PASS durable approval, real process, streaming output, persisted run');
 
+  await browse('click','button[aria-label="Explorer"]');
   await browse('click','.file-list button[title="index.js"]');
   await browse('click','.monaco-editor .view-lines');
   await browse('press',process.platform==='darwin'?'Meta+A':'Control+A');
   const edited='export const answer = 43; // saved through Monaco';
   await browse('type',edited);
-  await browse('click','.command-actions button:has-text("Save")');
+  await browse('click','.command-actions button[aria-label="Save"]');
   await eventually(async()=> (await readFile(join(repo,'index.js'),'utf8'))===edited,'Monaco save changed or lost typed bytes');
-  await browse('click','button:has-text("Changes")');
+  await browse('click','button[aria-label="Source control"]');
   await eventually(async()=> (await browse('text')).includes('+export const answer = 43'),'Git diff not visible');
   console.log('PASS Monaco edit/save with exact disk bytes and Git diff inspection');
 
-  await browse('click','button:has-text("Run replay")');
+  await browse('click','.editor-tab[data-tab="replay"] button');
   await eventually(async()=> (await browse('text')).includes('run › completed'),'Historical run events not visible');
   assert.equal(store.runs(project.id).length,1,'Replay started an unexpected run');
-  await browse('click','button:has-text("Graph canvas")');
-  await browse('click','.command-actions button:has-text("Save")');
+  await browse('click','.editor-tab[data-tab="graph"] button');
+  await browse('click','.command-actions button[aria-label="Save"]');
   const saved=store.graphs(project.id)[0]; assert.equal(saved.nodes.length,4); assert.equal(saved.edges.length,3);
   await mkdir('docs/screenshots',{recursive:true});
   await browse('screenshot',resolve('docs/screenshots/nodal.png'));

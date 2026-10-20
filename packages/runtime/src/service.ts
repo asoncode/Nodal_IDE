@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
-import { mkdir, writeFile as writeDisk } from 'node:fs/promises';
+import { mkdir, realpath, stat, writeFile as writeDisk } from 'node:fs/promises';
 import { z } from 'zod';
 import { GraphSchema, type Graph, type ExecutionEvent, type ApprovalRequest } from '../../shared/src/index.js';
 import { WorkflowEngine, type ExecutionContext, type NodeResult } from '../../core/src/engine.js';
@@ -58,8 +58,10 @@ export class NodalService {
       case 'bootstrap': return { projects: this.store.projects(), templates, providers: await this.providerStatus() };
       case 'providerStatus': return this.providerStatus();
       case 'openProject': {
-        const repo = await workspace.inspectRepository(params.path as string);
-        return this.store.addProject(repo.root, basename(repo.root), repo.branch);
+        const root = await realpath(params.path as string);
+        if (!(await stat(root)).isDirectory()) throw new Error('Choose a folder, not a file.');
+        const repo = await workspace.inspectRepository(root).catch(() => undefined);
+        return this.store.addProject(root, basename(root), repo?.branch, !!repo);
       }
       case 'files': return (await workspace.listFiles(this.store.project(projectId).root)).map(f => f.path);
       case 'readFile': return workspace.readFile(this.store.project(projectId).root, params.path as string);
@@ -106,7 +108,7 @@ export class NodalService {
     if (!validation.valid) throw new Error(validation.errors.map(e => e.message).join('\n'));
     const graph = structuredClone(validation.graph!);
     if (JSON.stringify(redact(graph)) !== JSON.stringify(graph)) throw new Error('Graph appears to contain credentials. Use official provider authentication; do not put secrets in commands or prompts.');
-    const repo = await workspace.inspectRepository(this.store.project(projectId).root);
+    const repo = await workspace.inspectRepository(this.store.project(projectId).root).catch(() => { throw new Error('Workflows require the root of a Git repository with an initial commit. You can still browse and edit this folder.'); });
     const runId = randomUUID();
     const run: StoredRun = { id: runId, projectId, graph, status: 'queued', createdAt: new Date().toISOString(), repositorySha: repo.head, parentRunId, nodeStates: {} };
     this.store.createRun(run);
@@ -226,7 +228,8 @@ export class NodalService {
     return { status: succeeded ? 'succeeded' : 'failed', error: succeeded ? undefined : 'Command did not pass its required exit status.', output: { ...output, worktree, head: committed.head }, artifacts: [{ id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
   }
   private async diffs(projectId: string, runId?: string) {
-    const project = this.store.project(projectId); const repo = await workspace.inspectRepository(project.root);
+    const project = this.store.project(projectId); const repo = await workspace.inspectRepository(project.root).catch(() => undefined);
+    if (!repo) return { diff: '', branch: 'Folder — Git not initialized', worktrees: [] };
     if (runId && this.store.run(runId).projectId !== projectId) throw new Error('Run does not belong to this project');
     const worktrees = [];
     for (const attempt of runId ? this.store.attempts(runId) : []) {

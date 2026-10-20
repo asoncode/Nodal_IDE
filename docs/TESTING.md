@@ -2,11 +2,13 @@
 
 ## Automated checks
 
-`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 73 unit/integration/UI cases across seven files.
+`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 85 unit/integration/UI cases across eight files.
 
 Coverage includes deterministic predicate evaluation, graph validation and templates, topological readiness, skipped branches, parallel concurrency, all join policies, retry readiness races, bounded loops with feedback evidence, iteration limits, cancellation during delayed retries, pause/resume boundaries, node/run timeout, approvals, journal failures, and interruption recovery.
 
 Real temporary-Git-repository integration cases exercise file hashes, traversal/links, dirty protection, parallel worktrees, credential/staged-path commit guards, Git hooks/config isolation, merge conflict rollback, process streaming/nonzero exit/timeout, descendant termination, actual runtime approvals, HTTP authentication/Origin/body validation, persisted event state, and reviewed integration. React Testing Library covers graph configuration/save, undo/redo, invalid graph blocking, file writes, generation preview, run events, and approval decisions.
+
+Folder-opening checks cover ordinary folders without Git initialization, file-path rejection, native picker cancellation, keeping dirty buffers when a switch is declined, empty new windows, native Save using the latest editor state without duplicate keyboard writes, window-close confirmation, and listener cleanup. Native event and dialog tests use explicit Tauri mocks; they do not replace OS menu/picker interaction testing.
 
 `pnpm build` compiles the renderer and Node runtime. `pnpm verify:bundle` starts the actual compiled sidecar with a temporary data directory, verifies its private handshake and authenticated desktop-origin API, checks initialized SQLite/templates, then verifies graceful shutdown. This catches bundler errors that TypeScript source tests cannot detect.
 

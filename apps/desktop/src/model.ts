@@ -2,7 +2,7 @@ import { createNode as makeNode } from '../../../packages/shared/src/index.js';
 import type { Graph, NodeKind, WorkflowNode } from '../../../packages/shared/src/index.js';
 export type { Graph, NodeKind };
 export type GraphNode = WorkflowNode;
-export interface Project { id: string; name: string; root: string; branch?: string }
+export interface Project { id: string; name: string; root: string; branch?: string; isGitRepository?: boolean }
 export interface Provider { id: string; available: boolean; authenticated: boolean; status: string; message?: string }
 export interface Run { id: string; projectId: string; graph: Graph; status: string; createdAt: string; finishedAt?: string }
 export interface Event { eventId: string; runId: string; nodeId?: string; sequence: number; timestamp: string; kind: string; payload: unknown }

@@ -28,8 +28,8 @@ Nodal implements a functional local MVP. The following specification items remai
 - Graph editing includes node configuration, add/connect, drag/pan/zoom, selection, copy/paste, delete, import/export, undo/redo, and minimap. Full context menus, arbitrary custom typed-port editing, an edge-compatibility guard during every connection gesture, and exhaustive keyboard/screen-reader QA are incomplete. Validation still blocks invalid execution.
 - Editing a running graph changes the draft and never changes the run snapshot. Historical replay presents saved events and attempts; the timeline scrubber does not reconstruct every historical canvas state. The renderer retains up to 2,000 fetched events; the database retains the complete bounded node streams.
 - Generation preview includes JSON, nodes, assignments, and maximum attempts/concurrency. A dedicated current-versus-generated graph diff view and guaranteed minimal incremental edits are not included.
-- The bottom dock uses native vertical CSS resizing; the full multi-pane layout has not been tested across all screen sizes. The desktop minimum size is 1000×650.
-- Projects must be existing Git repositories with an initial commit. `pnpm example` creates a starter repository; there is no general project-creation wizard.
+- The side bar, inspector, and bottom panel resize with pointer-drag sashes only (no keyboard resizing; sizes are not persisted); the full multi-pane layout has not been tested across all screen sizes. The desktop minimum size is 1000×650.
+- Any existing folder can be opened for browsing and editing, including through the native File menu. Workflows require a Git repository root with an initial commit. `pnpm example` creates a starter repository; there is no general project-creation wizard.
 - Merge nodes reconcile branches into an isolated integration worktree. Applying a selected completed worktree to the main checkout is a separate explicit action. Integration tests after that action must be requested/configured manually. Worktree cleanup requires manual Git maintenance after inspection; Nodal does not delete branches automatically.
 
 ## Packaging and validation

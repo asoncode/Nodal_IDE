@@ -1,35 +1,57 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ReactFlow, Background, Controls, MiniMap, Handle, Position, applyNodeChanges, applyEdgeChanges, type Node as FlowNode, type Edge as FlowEdge, type Connection, type ReactFlowInstance } from '@xyflow/react';
+import { ReactFlow, Background, BackgroundVariant, Controls, MiniMap, Handle, Position, applyNodeChanges, applyEdgeChanges, type Node as FlowNode, type Edge as FlowEdge, type Connection, type ReactFlowInstance } from '@xyflow/react';
 import Editor, { DiffEditor } from '@monaco-editor/react';
-import { Play, Pause, Square, Save, Check, Plus, Workflow, Code2, GitCompare, History, FolderOpen, ChevronRight, FileCode2, GitBranch, Command, Sparkles, Undo2, Redo2, Copy, Trash2, X, PanelLeftClose, PanelLeftOpen, Search, ArrowUpRight, Circle, Terminal, ShieldCheck, Download, Upload, Layers, Settings2 } from 'lucide-react';
+import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, CirclePlay, Bot, SquareTerminal, GitFork, Split, Merge, Repeat, UserCheck, GitMerge, Flag, CircleX, CircleCheck, type LucideIcon } from 'lucide-react';
 import { api } from './api.js';
+import { isDesktop, pickFolder, restoreLastProject, listenDesktopActions } from './desktop.js';
 import { createNode, emptyGraph, NODE_LABELS, language, type Graph, type GraphNode, type NodeKind, type Project, type Provider, type Run, type Event, type Inspection, type FileBuffer } from './model.js';
 import { GraphSchema } from '../../../packages/shared/src/index.js';
 import { validateGraph } from '../../../packages/core/src/index.js';
 
 type Tab = 'graph' | 'code' | 'diff' | 'replay';
+type View = 'explorer' | 'workflows' | 'runs' | 'providers';
 type Diff = { diff: string; branch: string; worktrees: { nodeId: string; path: string; branch: string; diff: string; head: string; sourceHead: string; dirty: boolean }[] };
+type TreeEntry = { name: string; path: string; children?: TreeEntry[] };
 const kinds = Object.keys(NODE_LABELS) as NodeKind[];
 const stringify = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 const activeStates = ['queued', 'running', 'paused', 'waiting_approval'];
-const nodeIcons: Record<NodeKind, string> = { start: '↗', agent: '◇', command: '>_', condition: '⑂', parallel: '⑃', join: '⑂', quality_gate: '↻', approval: '✓', merge: '⑃', end: '■' };
+const nodeIcons: Record<NodeKind, LucideIcon> = { start: CirclePlay, agent: Bot, command: SquareTerminal, condition: GitFork, parallel: Split, join: Merge, quality_gate: Repeat, approval: UserCheck, merge: GitMerge, end: Flag };
+const time = (value: string) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+function buildTree(paths: string[]): TreeEntry[] {
+  const root: TreeEntry[] = [];
+  for (const path of paths) {
+    let level = root;
+    const parts = path.split('/');
+    parts.forEach((name, index) => {
+      const folder = index < parts.length - 1;
+      let entry = level.find(item => item.name === name && !!item.children === folder);
+      if (!entry) { entry = { name, path: parts.slice(0, index + 1).join('/'), ...(folder ? { children: [] } : {}) }; level.push(entry); }
+      if (entry.children) level = entry.children;
+    });
+  }
+  const sort = (items: TreeEntry[]): TreeEntry[] => { items.sort((a, b) => Number(!!b.children) - Number(!!a.children) || a.name.localeCompare(b.name)); items.forEach(item => item.children && sort(item.children)); return items; };
+  return sort(root);
+}
 
 function WorkflowNodeView({ data, selected }: { data: { node: GraphNode; status: string }; selected?: boolean }) {
   const { node, status } = data;
+  const Icon = nodeIcons[node.kind];
   const ports = node.kind === 'condition' ? ['true', 'false'] : node.kind === 'quality_gate' ? ['pass', 'fail', 'inconclusive'] : ['out'];
-  const detail = node.kind === 'agent' ? node.config.provider : node.kind === 'command' ? `${node.config.command} ${node.config.args.join(' ')}` : node.kind === 'approval' ? 'Review before continuing' : node.kind === 'quality_gate' ? `Bounded · ${node.config.maxIterations} iterations` : NODE_LABELS[node.kind];
-  return <div className={`workflow-node ${selected ? 'selected' : ''} ${node.disabled ? 'disabled' : ''}`} data-state={status}>
-    {node.kind !== 'start' && <Handle type="target" position={Position.Left} id="in" />}
-    <div className="node-type"><span className="node-symbol">{nodeIcons[node.kind]}</span><span>{NODE_LABELS[node.kind]}</span><span className={`state-dot ${status}`} title={status}/></div>
-    <strong>{node.label}</strong><div className="node-detail">{detail}</div>
-    {status !== 'pending' && <div className="node-status">{status.replaceAll('_', ' ')}</div>}
-    {node.kind !== 'end' && ports.map((port, index) => <Handle key={port} type="source" position={Position.Right} id={port} title={port} style={{ top: `${(index + 1) * 100 / (ports.length + 1)}%` }}><span className="port-label">{ports.length > 1 ? port : ''}</span></Handle>)}
+  const detail = node.kind === 'agent' ? `${node.config.provider} · ${node.config.permission}` : node.kind === 'command' ? `${node.config.command} ${node.config.args.join(' ')}` : node.kind === 'approval' ? 'Review before continuing' : node.kind === 'quality_gate' ? `max ${node.config.maxIterations} iterations` : node.kind === 'join' ? node.config.mode.replaceAll('_', ' ') : undefined;
+  return <div className={`wf-node ${selected ? 'selected' : ''} ${node.disabled ? 'disabled' : ''}`} data-state={status}>
+    {node.kind !== 'start' && <Handle type="target" position={Position.Left} id="in"/>}
+    <div className="wf-node-kind"><Icon size={12}/><span>{NODE_LABELS[node.kind]}</span>{status !== 'pending' && <span className="wf-node-status">{status.replaceAll('_', ' ')}</span>}<span className={`state-dot ${status}`}/></div>
+    <div className="wf-node-label">{node.label}</div>
+    {detail && <div className="wf-node-detail">{detail}</div>}
+    {node.kind !== 'end' && ports.map((port, index) => <Handle key={port} type="source" position={Position.Right} id={port} title={port} style={{ top: `${(index + 1) * 100 / (ports.length + 1)}%` }}>{ports.length > 1 && <span className="port-label">{port}</span>}</Handle>)}
   </div>;
 }
 const nodeTypes = { workflow: WorkflowNodeView };
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="field"><span>{label}</span>{children}</label>; }
-function IconButton({ title, children, onClick, disabled }: { title: string; children: React.ReactNode; onClick: () => void; disabled?: boolean }) { return <button className="icon-button" title={title} aria-label={title} onClick={onClick} disabled={disabled}>{children}</button>; }
+function IconButton({ title, children, onClick, disabled, active, className }: { title: string; children: React.ReactNode; onClick: () => void; disabled?: boolean; active?: boolean; className?: string }) { return <button className={`icon-button ${active ? 'active' : ''} ${className ?? ''}`} title={title} aria-label={title} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>; }
+function DiffText({ text }: { text: string }) { return <pre className="unified-diff">{text.split('\n').map((line, index) => <span key={index} className={line.startsWith('@@') ? 'hunk' : line.startsWith('+') && !line.startsWith('+++') ? 'added' : line.startsWith('-') && !line.startsWith('---') ? 'removed' : undefined}>{line}{'\n'}</span>)}</pre>; }
 
 export default function App() {
   const [project, setProject] = useState<Project>();
@@ -47,9 +69,12 @@ export default function App() {
   const dragSnapshot = useRef<Graph | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<string>();
   const [tab, setTab] = useState<Tab>('graph');
-  const [sidebar, setSidebar] = useState(true);
+  const [view, setView] = useState<View>('explorer');
+  const [layout, setLayout] = useState({ sidebar: true, panel: true, inspector: true });
+  const [sizes, setSizes] = useState({ sidebar: 260, panel: 220, inspector: 300 });
   const [files, setFiles] = useState<string[]>([]);
   const [fileSearch, setFileSearch] = useState('');
+  const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [buffers, setBuffers] = useState<FileBuffer[]>([]);
   const [activeFile, setActiveFile] = useState<string>();
   const [runs, setRuns] = useState<Run[]>([]);
@@ -79,6 +104,11 @@ export default function App() {
   buffersRef.current = buffers;
   const graphRef = useRef(graph);
   graphRef.current = graph;
+  const graphBaseline = useRef(JSON.stringify(graph));
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  const explicitFolderChoice = useRef(false);
+  const folderPickerOpen = useRef(false);
   const selected = graph.nodes.find(node => node.id === selectedId);
   const edge = graph.edges.find(item => item.id === selectedEdge);
   const currentBuffer = buffers.find(buffer => buffer.path === activeFile);
@@ -86,6 +116,7 @@ export default function App() {
   const selectedRun = inspection?.run ?? runs.find(run => run.id === runId);
   const running = !!selectedRun && activeStates.includes(selectedRun.status);
   const approvals = inspection?.approvals.filter(item => !item.decision || item.decision === 'pending') ?? [];
+  const tree = useMemo(() => buildTree(files.slice(0, 5000)), [files]);
 
   const act = useCallback(async (task: () => Promise<void>) => { setBusy(true); setError(''); try { await task(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(false); } }, []);
   const edit = useCallback((update: Graph | ((old: Graph) => Graph)) => {
@@ -110,20 +141,31 @@ export default function App() {
     const copied = source.map(node => ({ ...structuredClone(node), id: crypto.randomUUID(), label: `${node.label} copy`, position: { x: node.position.x + 40, y: node.position.y + 40 } }));
     if (copied.length) { const mapping = new Map(source.map((node, index) => [node.id, copied[index].id])); const edges = graph.edges.filter(edge => mapping.has(edge.source) && mapping.has(edge.target)).map(edge => ({ ...edge, id: crypto.randomUUID(), source: mapping.get(edge.source)!, target: mapping.get(edge.target)! })); edit(old => ({ ...old, nodes: [...old.nodes, ...copied], edges: [...old.edges, ...edges] })); setSelectedId(copied[0].id); setSelectedIds(copied.map(node => node.id)); }
   }, [graph.nodes, graph.edges, selectedId, selectedIds, edit]);
+  const resize = (key: keyof typeof sizes, axis: 'x' | 'y', direction: 1 | -1) => (event: React.PointerEvent) => {
+    event.preventDefault();
+    const origin = axis === 'x' ? event.clientX : event.clientY, initial = sizes[key];
+    const move = (next: PointerEvent) => setSizes(old => ({ ...old, [key]: Math.min(640, Math.max(120, initial + direction * ((axis === 'x' ? next.clientX : next.clientY) - origin))) }));
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); document.body.classList.remove('resizing'); };
+    document.body.classList.add('resizing');
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
 
-  const loadProject = useCallback(async (selectedProject: Project) => {
-    const dirtyBuffers = buffersRef.current.filter(buffer => buffer.content !== buffer.savedContent);
-    if (dirtyBuffers.length && !window.confirm('Discard unsaved file edits and switch repository?')) return;
-    setProject(selectedProject); setBuffers([]); setActiveFile(undefined); setRunId(undefined); setInspection(undefined); setEvents([]);
+  const loadProject = useCallback(async (selectedProject: Project, discardConfirmed = false) => {
+    const unsaved = buffersRef.current.some(buffer => buffer.content !== buffer.savedContent) || JSON.stringify(graphRef.current) !== graphBaseline.current;
+    if (!discardConfirmed && unsaved && !window.confirm('Discard unsaved edits and open another folder?')) return false;
     const [nextFiles, nextGraphs, nextRuns] = await Promise.all([api<string[]>('files', { projectId: selectedProject.id }), api<Graph[]>('listGraphs', { projectId: selectedProject.id }), api<Run[]>('runs', { projectId: selectedProject.id })]);
-    setFiles(nextFiles); setGraphs(nextGraphs); setRuns(nextRuns);
-    if (nextGraphs.length) { setGraph(nextGraphs[0]); setSavedGraph(JSON.stringify(nextGraphs[0])); setUndo([]); setRedo([]); }
+    const nextGraph = nextGraphs[0] ?? emptyGraph();
+    graphRef.current = nextGraph; graphBaseline.current = JSON.stringify(nextGraph);
+    setProject(selectedProject); setBuffers([]); setActiveFile(undefined); setRunId(undefined); setInspection(undefined); setEvents([]); setDiff(undefined); setOpenFolders({});
+    setFiles(nextFiles); setGraphs(nextGraphs); setRuns(nextRuns); setGraph(nextGraph); setSavedGraph(nextGraphs.length ? JSON.stringify(nextGraph) : ''); setUndo([]); setRedo([]); setSelectedId(undefined); setSelectedIds([]); setSelectedEdge(undefined);
+    setTab(selectedProject.isGitRepository === false ? 'code' : 'graph');
     setMessage(`Opened ${selectedProject.name}`);
+    return true;
   }, []);
 
   useEffect(() => {
     let disposed = false;
-    void act(async () => { const bootstrap = await api<{ projects: Project[]; templates: Graph[]; providers: Provider[] }>('bootstrap'); if (disposed) return; setProjects(bootstrap.projects); setTemplates(bootstrap.templates); setProviders(bootstrap.providers); setConnected(true); setMessage('Local runtime connected'); if (bootstrap.projects[0]) await loadProject(bootstrap.projects[0]); });
+    void act(async () => { const restore = await restoreLastProject(); const bootstrap = await api<{ projects: Project[]; templates: Graph[]; providers: Provider[] }>('bootstrap'); if (disposed) return; setProjects(bootstrap.projects); setTemplates(bootstrap.templates); setProviders(bootstrap.providers); setConnected(true); setMessage('Local runtime connected'); if (!restore) setTab('code'); if (restore && !explicitFolderChoice.current && !projectRef.current && bootstrap.projects[0]) await loadProject(bootstrap.projects[0]); });
     return () => { disposed = true; };
   }, [act, loadProject]);
 
@@ -162,6 +204,7 @@ export default function App() {
   }, [project]);
 
   const save = useCallback(async () => {
+    if (tab === 'code' && !currentBuffer) return;
     if (!project) { setModal('project'); return; }
     if (tab === 'code' && currentBuffer) {
       const result = await api<{ content: string; hash: string }>('writeFile', { projectId: project.id, path: currentBuffer.path, content: currentBuffer.content, expectedHash: currentBuffer.hash });
@@ -169,16 +212,52 @@ export default function App() {
       setMessage(`Saved ${currentBuffer.path}`);
     } else {
       const saved = await api<Graph>('saveGraph', { projectId: project.id, graph });
-      setGraph(saved); setSavedGraph(JSON.stringify(saved)); setGraphs(await api<Graph[]>('listGraphs', { projectId: project.id })); setMessage(`Saved revision ${saved.revision}`);
+      graphBaseline.current = JSON.stringify(saved); setGraph(saved); setSavedGraph(JSON.stringify(saved)); setGraphs(await api<Graph[]>('listGraphs', { projectId: project.id })); setMessage(`Saved revision ${saved.revision}`);
     }
   }, [project, tab, currentBuffer, graph]);
 
+  const openFolderPath = useCallback(async (path: string) => {
+    const unsaved = buffersRef.current.some(buffer => buffer.content !== buffer.savedContent) || JSON.stringify(graphRef.current) !== graphBaseline.current;
+    if (unsaved && !window.confirm('Discard unsaved edits and open another folder?')) return;
+    const next = await api<Project>('openProject', { path });
+    if (!await loadProject(next, true)) return;
+    setProjects(items => [...items.filter(item => item.id !== next.id), next]);
+    setView('explorer'); setLayout(old => ({ ...old, sidebar: true })); setTab('code'); setModal(null);
+  }, [loadProject]);
+  const openFolder = useCallback(() => {
+    explicitFolderChoice.current = true;
+    if (!isDesktop()) { setModal('project'); return; }
+    if (folderPickerOpen.current) return;
+    folderPickerOpen.current = true;
+    void act(async () => {
+      try { const path = await pickFolder(); if (path) await openFolderPath(path); }
+      finally { folderPickerOpen.current = false; }
+    });
+  }, [act, openFolderPath]);
+  const desktopActions = useRef({ openFolder, save: () => void act(save) });
+  desktopActions.current = { openFolder, save: () => void act(save) };
+  useEffect(() => {
+    let disposed = false; let stop: (() => void) | undefined;
+    void listenDesktopActions({
+      openFolder: () => { if (!disposed) desktopActions.current.openFolder(); },
+      save: () => { if (!disposed) desktopActions.current.save(); },
+      canClose: () => {
+        const unsaved = buffersRef.current.some(buffer => buffer.content !== buffer.savedContent) || JSON.stringify(graphRef.current) !== graphBaseline.current;
+        return !unsaved || window.confirm('Discard unsaved edits and close this window?');
+      },
+    }).then(unlisten => { if (disposed) unlisten(); else stop = unlisten; }).catch(cause => { if (!disposed) setError(`Desktop menu connection failed: ${String(cause)}`); });
+    return () => { disposed = true; stop?.(); };
+  }, []);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      const element = event.target as HTMLElement;
-      const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) || element.closest('.monaco-editor');
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); void act(save); return; }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setModal('palette'); return; }
+      const element = event.target;
+      const editing = element instanceof HTMLElement && (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) || element.closest('.monaco-editor'));
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { if (!isDesktop()) { event.preventDefault(); void act(save); } return; }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'o' && !isDesktop()) { event.preventDefault(); openFolder(); return; }
+      if ((event.metaKey || event.ctrlKey) && ['k', 'p'].includes(event.key.toLowerCase())) { event.preventDefault(); setPaletteQuery(''); setModal('palette'); return; }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); setLayout(old => ({ ...old, sidebar: !old.sidebar })); return; }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'j') { event.preventDefault(); setLayout(old => ({ ...old, panel: !old.panel })); return; }
       if (event.key === 'Escape') { setModal(null); setSelectedId(undefined); setSelectedEdge(undefined); }
       if (editing || tab !== 'graph') return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); if (event.shiftKey) redoGraph(); else undoGraph(); }
@@ -187,71 +266,266 @@ export default function App() {
       if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); }
     };
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
-  }, [save, act, tab, graph.nodes, selectedId, selectedIds, duplicate, deleteSelection, undoGraph, redoGraph]);
+  }, [save, act, tab, graph.nodes, selectedId, selectedIds, duplicate, deleteSelection, undoGraph, redoGraph, openFolder]);
 
   const openFile = (path: string) => void act(async () => {
     if (!project) return;
     if (!buffers.some(buffer => buffer.path === path)) { const file = await api<{ content: string; hash: string }>('readFile', { projectId: project.id, path }); setBuffers(items => [...items, { path, ...file, savedContent: file.content }]); }
-    setActiveFile(path); setTab('code');
+    setActiveFile(path); setTab('code'); setModal(null);
   });
+  const closeFile = (buffer: FileBuffer) => {
+    if (buffer.content !== buffer.savedContent && !window.confirm(`Discard unsaved edits to ${buffer.path}?`)) return;
+    const remaining = buffers.filter(item => item.path !== buffer.path);
+    setBuffers(remaining);
+    if (activeFile === buffer.path) { setActiveFile(remaining.at(-1)?.path); if (!remaining.length && tab === 'code') setTab('graph'); }
+  };
   const selectRun = (run: Run) => { setRunId(run.id); setInspection(undefined); setTab('replay'); setMessage(`Recorded run · ${run.id.slice(0, 8)}`); };
   const validation = useMemo(() => validateGraph(graph), [graph]);
   const startRun = () => void act(async () => {
     if (!project) { setModal('project'); return; }
+    if (project.isGitRepository === false) throw new Error('Workflows require a Git repository with an initial commit. You can still browse and edit this folder.');
     if (!validation.valid) throw new Error(validation.errors.map(issue => issue.message).join(' · '));
-    const run = await api<Run>('run', { projectId: project.id, graph }); setRunId(run.id); setInspection(undefined); setRuns(items => [run, ...items]); setDock('events'); setMessage('Run started. Workflow snapshot is pinned; edits create a draft.');
+    const run = await api<Run>('run', { projectId: project.id, graph }); setRunId(run.id); setInspection(undefined); setRuns(items => [run, ...items]); setDock('events'); setLayout(old => ({ ...old, panel: true })); setMessage('Run started. Workflow snapshot is pinned; edits create a draft.');
   });
   const flowNodes: FlowNode[] = graph.nodes.map(node => ({ id: node.id, type: 'workflow', position: node.position, measured: nodeDimensions[node.id], selected: selectedIds.includes(node.id), data: { node, status: inspection?.attempts.filter(attempt => attempt.nodeId === node.id).at(-1)?.state ?? 'pending' } }));
-  const flowEdges: FlowEdge[] = graph.edges.map(item => ({ ...item, sourceHandle: item.sourcePort ?? (graph.nodes.find(node => node.id === item.source)?.kind === 'quality_gate' ? 'pass' : graph.nodes.find(node => node.id === item.source)?.kind === 'condition' ? 'true' : 'out'), targetHandle: 'in', selected: item.id === selectedEdge, type: 'smoothstep', label: item.kind === 'loop' ? '↻ loop' : item.sourcePort && !['out', 'in'].includes(item.sourcePort) ? item.sourcePort : item.kind === 'artifact' ? 'artifact' : undefined, style: { stroke: item.kind === 'loop' ? '#d5a661' : item.kind === 'artifact' ? '#9c91d0' : '#52676d', strokeWidth: 1.5, strokeDasharray: item.kind === 'artifact' ? '5 4' : undefined } }));
+  const flowEdges: FlowEdge[] = graph.edges.map(item => ({ ...item, sourceHandle: item.sourcePort ?? (graph.nodes.find(node => node.id === item.source)?.kind === 'quality_gate' ? 'pass' : graph.nodes.find(node => node.id === item.source)?.kind === 'condition' ? 'true' : 'out'), targetHandle: 'in', selected: item.id === selectedEdge, type: 'smoothstep', label: item.kind === 'loop' ? 'loop' : item.sourcePort && !['out', 'in'].includes(item.sourcePort) ? item.sourcePort : item.kind === 'artifact' ? 'artifact' : undefined, style: { stroke: item.id === selectedEdge ? 'var(--accent)' : item.kind === 'loop' ? 'var(--warn)' : item.kind === 'artifact' ? 'var(--artifact)' : 'var(--edge)', strokeWidth: 1.25, strokeDasharray: item.kind === 'artifact' ? '5 4' : undefined } }));
   const connectNodes = (connection: Connection) => { if (!connection.source || !connection.target) return; edit(old => ({ ...old, edges: [...old.edges, { id: crypto.randomUUID(), source: connection.source!, target: connection.target!, sourcePort: connection.sourceHandle ?? undefined, kind: 'control' }] })); };
   const refreshDiff = () => void act(async () => { if (project) { setDiff(await api<Diff>('diff', { projectId: project.id, runId })); setTab('diff'); } });
   const applyTemplate = (template: Graph) => { if (dirty && savedGraph && !window.confirm('Replace the current draft with this template?')) return; edit({ ...structuredClone(template), id: crypto.randomUUID(), revision: 1 }); setSelectedId(undefined); setTab('graph'); };
   const exportGraph = () => { const url = URL.createObjectURL(new Blob([JSON.stringify(graph, null, 2)], { type: 'application/json' })); const link = document.createElement('a'); link.href = url; link.download = `${graph.name.replace(/[^a-z0-9]/gi, '-')}.json`; link.click(); URL.revokeObjectURL(url); };
+  const openProjectPath = () => { explicitFolderChoice.current = true; void act(() => openFolderPath(projectPath)); };
+  const showView = (next: View) => setLayout(old => { const toggle = old.sidebar && view === next; setView(next); return { ...old, sidebar: !toggle }; });
   const displayedEvents = tab === 'replay' ? events.slice(0, replayIndex) : events;
+  const fileRows = (entries: TreeEntry[], depth: number): React.ReactNode[] => entries.flatMap(entry => {
+    if (entry.children) {
+      const open = openFolders[entry.path] ?? depth === 0;
+      return [<button key={entry.path} className="tree-row" style={{ paddingLeft: 8 + depth * 12 }} aria-expanded={open} onClick={() => setOpenFolders(old => ({ ...old, [entry.path]: !open }))}>{open ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{entry.name}</span></button>, ...(open ? fileRows(entry.children, depth + 1) : [])];
+    }
+    return [<button key={entry.path} title={entry.path} aria-label={entry.path} className={`tree-row file ${tab === 'code' && activeFile === entry.path ? 'active' : ''}`} style={{ paddingLeft: 22 + depth * 12 }} onClick={() => openFile(entry.path)}><FileCode2 size={14}/><span>{entry.name}</span>{buffers.some(buffer => buffer.path === entry.path && buffer.content !== buffer.savedContent) && <span className="dirty-dot"/>}</button>];
+  });
+  const paletteKinds = kinds.filter(kind => NODE_LABELS[kind].toLowerCase().includes(paletteQuery.toLowerCase()));
+  const paletteFiles = paletteQuery ? files.filter(path => path.toLowerCase().includes(paletteQuery.toLowerCase())).slice(0, 8) : [];
 
   return <div className="app-shell">
-    <header className="command-bar">
-      <div className="brand"><span className="brand-mark"><Workflow size={20}/></span><span>Nodal<span className="brand-period">.</span></span></div>
-      <div className="project-crumb"><span className="separator">/</span><button onClick={() => setModal('project')}><FolderOpen size={14}/>{project?.name ?? 'Open a repository'}<ChevronRight size={12}/></button><span className="separator">/</span><span className="graph-name">{graph.name}</span><span className="revision">r{graph.revision}{dirty ? ' · draft' : ''}</span></div>
-      <div className="command-actions"><button className="quiet" onClick={() => { setMessage(validation.valid ? 'Graph is valid. All paths and execution bounds checked.' : ''); setError(validation.valid ? '' : validation.errors.map(issue => issue.message).join(' · ')); }}><ShieldCheck size={14}/>Validate</button><button className="quiet" disabled={busy} onClick={() => void act(save)}><Save size={14}/>Save</button><button className="quiet generate-button" onClick={() => { setGenerated(undefined); setModal('generate'); }}><Sparkles size={14}/>Generate</button><span className="action-divider"/><IconButton title={inspection?.run.status === 'paused' ? 'Resume run' : 'Pause run'} disabled={!running || busy} onClick={() => void act(async () => { await api(inspection?.run.status === 'paused' ? 'resume' : 'pause', { runId }); })}><Pause size={15}/></IconButton><IconButton title="Stop run" disabled={!running || busy} onClick={() => void act(async () => { await api('cancel', { runId }); })}><Square size={14}/></IconButton><button className="primary run-button" disabled={busy || running} onClick={startRun}><Play size={14} fill="currentColor"/>Run workflow</button></div>
+    <header className="title-bar">
+      <div className="title-left"><span className="brand-mark" aria-hidden="true"><Workflow size={14}/></span><span className="brand-name">Nodal</span></div>
+      <button className="command-center" onClick={() => { setPaletteQuery(''); setModal('palette'); }}><Search size={13}/><span>{project?.name ?? 'Nodal'}</span><kbd>⌘K</kbd></button>
+      <div className="command-actions">
+        <IconButton title="Validate" onClick={() => { setMessage(validation.valid ? 'Graph is valid. All paths and execution bounds checked.' : ''); setError(validation.valid ? '' : validation.errors.map(issue => issue.message).join(' · ')); }}><ShieldCheck size={15}/></IconButton>
+        <IconButton title="Save" disabled={busy} onClick={() => void act(save)}><Save size={15}/></IconButton>
+        <IconButton title="Generate" onClick={() => { setGenerated(undefined); setModal('generate'); }}><Sparkles size={15}/></IconButton>
+        <span className="divider"/>
+        <IconButton title={inspection?.run.status === 'paused' ? 'Resume run' : 'Pause run'} disabled={!running || busy} onClick={() => void act(async () => { await api(inspection?.run.status === 'paused' ? 'resume' : 'pause', { runId }); })}><Pause size={15}/></IconButton>
+        <IconButton title="Stop run" disabled={!running || busy} onClick={() => void act(async () => { await api('cancel', { runId }); })}><Square size={13}/></IconButton>
+        <button className="run-button" aria-label="Run workflow" title="Run workflow" disabled={busy || running} onClick={startRun}><Play size={12} fill="currentColor"/>Run</button>
+        <span className="divider"/>
+        <IconButton title="Toggle sidebar" active={layout.sidebar} onClick={() => setLayout(old => ({ ...old, sidebar: !old.sidebar }))}><PanelLeft size={15}/></IconButton>
+        <IconButton title="Toggle panel" active={layout.panel} onClick={() => setLayout(old => ({ ...old, panel: !old.panel }))}><PanelBottom size={15}/></IconButton>
+        <IconButton title="Toggle inspector" active={layout.inspector} onClick={() => setLayout(old => ({ ...old, inspector: !old.inspector }))}><PanelRight size={15}/></IconButton>
+      </div>
     </header>
-    <div className="workspace">
-      {sidebar && <aside className="sidebar">
-        <div className="sidebar-project"><span className="repo-icon"><FolderOpen size={18}/></span><div><strong>{project?.name ?? 'Your workspace'}</strong><span><GitBranch size={11}/>{project?.branch ?? 'No repository connected'}</span></div><button className="tiny" title="Open repository" aria-label="Open repository" onClick={() => setModal('project')}><Plus size={14}/></button></div>
-        <div className="sidebar-scroll"><section><div className="section-title">WORKFLOWS<button className="tiny" title="New workflow" aria-label="New workflow" onClick={() => { edit(emptyGraph()); setTab('graph'); }}><Plus size={13}/></button></div>{graphs.length ? graphs.map(item => <button key={item.id} className={`sidebar-item ${item.id === graph.id ? 'active' : ''}`} onClick={() => { if (dirty && !window.confirm('Discard unsaved graph changes?')) return; setGraph(item); setSavedGraph(JSON.stringify(item)); setUndo([]); setRedo([]); setSelectedId(undefined); setTab('graph'); }}><Workflow size={14}/><span>{item.name}</span><small>r{item.revision}</small></button>) : <p className="sidebar-hint">Save a workflow to keep it here.</p>}</section>
-          <section><div className="section-title">REPOSITORY <span>{files.length} files</span></div><label className="file-search"><Search size={12}/><input aria-label="Search files" placeholder="Find a file…" value={fileSearch} onChange={event => setFileSearch(event.target.value)}/></label><div className="file-list">{files.filter(path => path.toLowerCase().includes(fileSearch.toLowerCase())).slice(0, 500).map(path => <button key={path} title={path} className={`file-item ${activeFile === path ? 'active' : ''}`} onClick={() => openFile(path)}><FileCode2 size={13}/><span>{path}</span>{buffers.some(buffer => buffer.path === path && buffer.content !== buffer.savedContent) && <span className="dirty-dot"/>}</button>)}{!files.length && <p className="sidebar-hint">Open a local Git repository to browse and edit its files.</p>}</div></section>
-          <section><div className="section-title">START FROM A TEMPLATE</div>{templates.map(template => <button key={template.id} className="sidebar-item" onClick={() => applyTemplate(template)}><Layers size={13}/><span>{template.name}</span><ArrowUpRight size={12}/></button>)}</section>
-          <section><div className="section-title">RECENT RUNS <span>{runs.length}</span></div>{runs.slice(0, 10).map(run => <button key={run.id} className={`sidebar-item ${runId === run.id ? 'active' : ''}`} onClick={() => selectRun(run)}><span className={`state-dot ${run.status}`}/><span>{run.graph?.name ?? run.id.slice(0, 8)}</span><small>{new Date(run.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small></button>)}{!runs.length && <p className="sidebar-hint">Executed workflows appear here.</p>}</section>
-        </div><div className="provider-panel"><div className="section-title">PROVIDERS<button className="tiny" title="Refresh provider status" aria-label="Refresh provider status" onClick={() => void act(async () => setProviders(await api<Provider[]>('providerStatus')))}><History size={12}/></button></div>{providers.map(provider => <div className="provider-row" key={provider.id} title={provider.message}><span className={`state-dot ${provider.available && provider.authenticated ? 'succeeded' : 'pending'}`}/><span>{provider.id}</span><small>{provider.authenticated ? 'Ready' : provider.available ? 'Auth required' : 'Not configured'}</small></div>)}<p>Local-first · permissions enforced per run</p></div>
-      </aside>}
-      <main className="main-area">
-        <nav className="view-tabs" aria-label="Workspace views"><IconButton title={sidebar ? 'Hide sidebar' : 'Show sidebar'} onClick={() => setSidebar(!sidebar)}>{sidebar ? <PanelLeftClose size={15}/> : <PanelLeftOpen size={15}/>}</IconButton>{([{ id: 'graph', label: 'Graph canvas', icon: Workflow }, { id: 'code', label: 'Code editor', icon: Code2 }, { id: 'diff', label: 'Changes', icon: GitCompare }, { id: 'replay', label: 'Run replay', icon: History }] as const).map(item => <button key={item.id} className={tab === item.id ? 'selected' : ''} onClick={() => item.id === 'diff' ? refreshDiff() : setTab(item.id)}><item.icon size={14}/>{item.label}{item.id === 'code' && buffers.some(buffer => buffer.content !== buffer.savedContent) && <span className="dirty-dot"/>}</button>)}<button className="palette-trigger" onClick={() => setModal('palette')}><Command size={12}/><span>K</span></button></nav>
-        {error && <div className="error-banner" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={14}/></button></div>}
-        <div className="editor-region">
-          <div className="center-pane">
-            {tab === 'graph' && <><div className="canvas-toolbar"><div><span className="eyebrow">WORKFLOW</span><span>{graph.nodes.length} nodes <span className="muted">/</span> {graph.edges.length} connections</span>{running && <span className="live-indicator">Run pinned to r{inspection?.run.graph?.revision ?? graph.revision}</span>}</div><div><IconButton title="Undo" disabled={!undo.length} onClick={undoGraph}><Undo2 size={15}/></IconButton><IconButton title="Redo" disabled={!redo.length} onClick={redoGraph}><Redo2 size={15}/></IconButton><span className="action-divider"/><IconButton title="Import graph JSON" onClick={() => importInput.current?.click()}><Upload size={14}/></IconButton><IconButton title="Export graph JSON" onClick={exportGraph}><Download size={14}/></IconButton><button className="add-node-button" onClick={() => { setPaletteQuery(''); setModal('palette'); }}><Plus size={14}/>Add node</button></div></div><div className="canvas" onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); const kind = event.dataTransfer.getData('application/nodal-node') as NodeKind; if (kinds.includes(kind)) addNode(kind, flowInstance.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY })); }}><ReactFlow onInit={instance => { flowInstance.current = instance; }} nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes} onNodeClick={(_event, node) => { setSelectedId(node.id); setSelectedEdge(undefined); }} onEdgeClick={(_event, item) => { setSelectedEdge(item.id); setSelectedId(undefined); }} onPaneClick={() => { setSelectedId(undefined); setSelectedIds([]); setSelectedEdge(undefined); }} onNodeDragStart={() => { dragSnapshot.current = structuredClone(graphRef.current); }} onNodeDragStop={() => { if (dragSnapshot.current) { const before = dragSnapshot.current; if (JSON.stringify(before.nodes.map(node => node.position)) !== JSON.stringify(graphRef.current.nodes.map(node => node.position))) { setUndo(items => [...items.slice(-49), before]); setRedo([]); } dragSnapshot.current = null; } }} onNodesChange={changes => { const changed = applyNodeChanges(changes, flowNodes); const dimensions = changes.filter(change => change.type === 'dimensions' && change.dimensions); if (dimensions.length) setNodeDimensions(old => ({ ...old, ...Object.fromEntries(dimensions.flatMap(change => change.type === 'dimensions' && change.dimensions ? [[change.id, change.dimensions]] : [])) })); if (changes.some(change => change.type === 'select')) setSelectedIds(changed.filter(node => node.selected).map(node => node.id)); if (changes.some(change => change.type === 'position')) setGraph(old => ({ ...old, nodes: old.nodes.map(node => ({ ...node, position: changed.find(item => item.id === node.id)?.position ?? node.position })) })); }} onEdgesChange={changes => { if (changes.some(change => change.type === 'remove')) { const remaining = applyEdgeChanges(changes, flowEdges); edit(old => ({ ...old, edges: old.edges.filter(item => remaining.some(next => next.id === item.id)) })); } }} onConnect={connectNodes} isValidConnection={connection => connection.source !== connection.target && graph.nodes.find(node => node.id === connection.source)?.kind !== 'end' && graph.nodes.find(node => node.id === connection.target)?.kind !== 'start'} deleteKeyCode={null} fitView fitViewOptions={{ padding: .25 }} minZoom={.25} maxZoom={1.6} colorMode="dark"><Background color="#2d393f" gap={22} size={1}/><Controls showInteractive={false}/><MiniMap nodeColor="#3f6469" maskColor="#14191ccc" pannable zoomable/></ReactFlow><div className="canvas-caption"><span className="state-dot succeeded"/>Build with agents. See every decision.</div></div></>}
-            {tab === 'code' && <div className="code-pane"><div className="file-tabs">{buffers.map(buffer => <div key={buffer.path} className={activeFile === buffer.path ? 'active' : ''}><button title={buffer.path} onClick={() => setActiveFile(buffer.path)}><FileCode2 size={13}/>{buffer.path.split('/').at(-1)}{buffer.content !== buffer.savedContent && <span className="dirty-dot"/>}</button><button aria-label={`Close ${buffer.path}`} onClick={() => { if (buffer.content !== buffer.savedContent && !window.confirm(`Discard unsaved edits to ${buffer.path}?`)) return; setBuffers(items => items.filter(item => item.path !== buffer.path)); if (activeFile === buffer.path) setActiveFile(buffers.find(item => item.path !== buffer.path)?.path); }}><X size={12}/></button></div>)}</div>{currentBuffer ? <><div className="editor-breadcrumb">{currentBuffer.path}<span>{project?.branch ?? 'Working tree'}</span></div>{currentBuffer.external && <div className="conflict-banner">File changed on disk. Your edits are preserved.<button onClick={() => setTab('diff')}>Compare</button><button onClick={() => setBuffers(items => items.map(buffer => buffer.path === currentBuffer.path && buffer.external ? { ...buffer, content: buffer.external.content, savedContent: buffer.external.content, hash: buffer.external.hash, external: undefined } : buffer))}>Reload from disk</button></div>}<Editor path={currentBuffer.path} language={language(currentBuffer.path)} value={currentBuffer.content} theme="vs-dark" onChange={value => setBuffers(items => items.map(buffer => buffer.path === activeFile ? { ...buffer, content: value ?? '' } : buffer))} options={{ editContext: false, fontSize: 13, fontFamily: 'SFMono-Regular, Consolas, monospace', minimap: { enabled: false }, padding: { top: 18 }, scrollBeyondLastLine: false, automaticLayout: true }}/></> : <div className="empty-state"><Code2 size={32}/><h2>Your repository, within reach.</h2><p>Select a file from the explorer to inspect or edit it.</p><button className="secondary" onClick={() => setModal('project')}><FolderOpen size={14}/>Open repository</button></div>}</div>}
-            {tab === 'diff' && <div className="diff-pane"><div className="panel-heading"><div><GitCompare size={16}/><strong>Review changes</strong><span>{diff?.branch ?? project?.branch ?? 'Working tree'}</span></div><button className="quiet" onClick={refreshDiff}>Refresh</button></div>{currentBuffer?.external ? <><div className="conflict-banner">Disk version → your unsaved buffer. Reload from the editor to discard your edits.</div><DiffEditor original={currentBuffer.external.content} modified={currentBuffer.content} language={language(currentBuffer.path)} theme="vs-dark" options={{ readOnly: true, minimap: { enabled: false }, automaticLayout: true }}/></> : <div className="diff-scroll"><pre className="unified-diff">{diff?.diff || 'No changes in the main working tree.'}</pre>{diff?.worktrees?.map(tree => <section className="worktree-diff" key={tree.path}><h3><GitBranch size={14}/>{tree.branch}</h3><p>{tree.path}</p><button className="secondary" disabled={busy || running || !tree.diff} onClick={() => void act(async () => { if (!window.confirm(`Apply the reviewed changes from ${tree.branch} to your repository? Your working tree must be clean. This creates a local integration commit.`)) return; await api('applyChanges', { runId, nodeId: tree.nodeId, expectedHead: tree.head, expectedSourceHead: tree.sourceHead, approved: true }); setDiff(await api<Diff>('diff', { projectId: project?.id, runId })); setMessage('Integrated approved changes into the repository.'); })}><Check size={13}/>Apply reviewed changes</button><pre className="unified-diff">{tree.diff || 'No changes in this worktree.'}</pre></section>)}</div>}</div>}
-            {tab === 'replay' && <div className="replay-pane"><div className="panel-heading"><div><History size={16}/><strong>Recorded execution</strong><span>{inspection?.run.status ?? 'No run selected'}</span></div>{runId && <button className="secondary" disabled={busy || running} onClick={() => void act(async () => { const next = await api<Run>('rerun', { runId, confirmed: true }); setRuns(items => [next, ...items]); setRunId(next.id); setMessage('Created a new run from the recorded workflow.'); })}><Play size={13}/>Re-run as new run</button>}</div>{runId ? <><div className="run-summary"><div><span>RUN</span><strong>{runId.slice(0, 8)}</strong></div><div><span>GRAPH REVISION</span><strong>r{inspection?.run.graph?.revision ?? '—'}</strong></div><div><span>CHECKPOINTS</span><strong>{inspection?.checkpoints.length ?? 0}</strong></div><div><span>PROVIDER SPENDING</span><strong>Unavailable</strong></div></div><label className="replay-scrubber">Recorded events <input type="range" min="0" max={events.length} value={Math.min(replayIndex, events.length)} onChange={event => setReplayIndex(Number(event.target.value))}/><span>{Math.min(replayIndex, events.length)} / {events.length}</span></label><div className="replay-events">{displayedEvents.map(event => <div className="replay-event" key={event.eventId}><span className={`state-dot ${event.kind.includes('failed') ? 'failed' : 'succeeded'}`}/><time>{new Date(event.timestamp).toLocaleTimeString()}</time><div><strong>{event.kind.replaceAll('_', ' ').replaceAll('.', ' › ')}</strong><small>{event.nodeId && inspection?.run.graph?.nodes.find(node => node.id === event.nodeId)?.label}</small><pre>{stringify(event.payload)}</pre></div></div>)}</div></> : <div className="empty-state"><History size={32}/><h2>Every decision leaves a trace.</h2><p>Run a workflow or select a recent run to inspect its recorded events.</p></div>}</div>}
+
+    <div className="workbench">
+      <nav className="activity-bar" aria-label="Views">
+        {([{ id: 'explorer', label: 'Explorer', icon: Files }, { id: 'workflows', label: 'Workflows', icon: Workflow }, { id: 'runs', label: 'Runs', icon: History }, { id: 'providers', label: 'Providers', icon: Plug }] as const).map(item => <button key={item.id} className={layout.sidebar && view === item.id ? 'active' : ''} title={item.label} aria-label={item.label} onClick={() => showView(item.id)}><item.icon size={22} strokeWidth={1.5}/></button>)}
+        <button className={tab === 'diff' ? 'active' : ''} title="Source control" aria-label="Source control" onClick={refreshDiff}><GitCompare size={22} strokeWidth={1.5}/></button>
+      </nav>
+
+      {layout.sidebar && <>
+        <aside className="sidebar" style={{ width: sizes.sidebar }}>
+          {view === 'explorer' && <>
+            <div className="view-title"><span>Explorer</span><IconButton title="Open Folder" onClick={openFolder}><FolderOpen size={15}/></IconButton></div>
+            <div className="section-header"><ChevronDown size={14}/><span>{project?.name ?? 'No folder open'}</span>{project?.branch && <small><GitBranch size={11}/>{project.branch}</small>}</div>
+            {files.length > 0 && <label className="filter-input"><Search size={12}/><input aria-label="Search files" placeholder="Filter files" value={fileSearch} onChange={event => setFileSearch(event.target.value)}/></label>}
+            <div className="file-list">
+              {fileSearch ? files.filter(path => path.toLowerCase().includes(fileSearch.toLowerCase())).slice(0, 500).map(path => <button key={path} title={path} aria-label={path} className={`tree-row file ${tab === 'code' && activeFile === path ? 'active' : ''}`} onClick={() => openFile(path)}><FileCode2 size={14}/><span>{path}</span></button>) : fileRows(tree, 0)}
+              {!files.length && <div className="sidebar-empty"><p>{project ? 'This folder has no files to show.' : 'Open a folder to browse and edit its files.'}</p><button className="primary block" onClick={openFolder}>Open Folder</button></div>}
+            </div>
+          </>}
+          {view === 'workflows' && <>
+            <div className="view-title"><span>Workflows</span><IconButton title="New workflow" onClick={() => { edit(emptyGraph()); setSelectedId(undefined); setTab('graph'); }}><Plus size={15}/></IconButton></div>
+            <div className="sidebar-scroll">
+              <div className="section-header"><ChevronDown size={14}/><span>Saved</span></div>
+              {graphs.map(item => <button key={item.id} className={`sidebar-item ${item.id === graph.id ? 'active' : ''}`} onClick={() => { if (dirty && !window.confirm('Discard unsaved graph changes?')) return; graphRef.current = item; graphBaseline.current = JSON.stringify(item); setGraph(item); setSavedGraph(JSON.stringify(item)); setUndo([]); setRedo([]); setSelectedId(undefined); setTab('graph'); }}><Workflow size={14}/><span>{item.name}</span><small>r{item.revision}</small></button>)}
+              {!graphs.length && <p className="sidebar-hint">Saved workflows appear here.</p>}
+              <div className="section-header"><ChevronDown size={14}/><span>Templates</span></div>
+              {templates.map(template => <button key={template.id} className="sidebar-item" title="Open as a new draft" onClick={() => applyTemplate(template)}><Workflow size={14}/><span>{template.name}</span></button>)}
+            </div>
+          </>}
+          {view === 'runs' && <>
+            <div className="view-title"><span>Runs</span><small>{runs.length}</small></div>
+            <div className="sidebar-scroll">
+              {runs.map(run => <button key={run.id} className={`sidebar-item ${runId === run.id ? 'active' : ''}`} title={run.status.replaceAll('_', ' ')} onClick={() => selectRun(run)}><span className={`state-dot ${run.status}`}/><span>{run.graph?.name ?? run.id.slice(0, 8)}</span><small>{new Date(run.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small></button>)}
+              {!runs.length && <p className="sidebar-hint">Executed workflows appear here.</p>}
+            </div>
+          </>}
+          {view === 'providers' && <>
+            <div className="view-title"><span>Providers</span><IconButton title="Refresh provider status" onClick={() => void act(async () => setProviders(await api<Provider[]>('providerStatus')))}><RefreshCw size={14}/></IconButton></div>
+            <div className="sidebar-scroll">
+              {providers.map(provider => <div className="provider-row" key={provider.id}><span className={`state-dot ${provider.available && provider.authenticated ? 'succeeded' : 'pending'}`}/><div><strong>{provider.id}</strong><small>{provider.authenticated ? 'Ready' : provider.available ? 'Authentication required' : 'Not configured'}</small>{provider.message && <p>{provider.message}</p>}</div></div>)}
+              <p className="sidebar-hint">Provider requests run from the local runtime. Permissions are enforced per run.</p>
+            </div>
+          </>}
+        </aside>
+        <div className="sash vertical" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" onPointerDown={resize('sidebar', 'x', 1)}/>
+      </>}
+
+      <main className="main-column">
+        <div className="editor-group">
+          <div className="tab-bar">
+            <div className="tabs" role="tablist" aria-label="Open editors">
+              <div className={`editor-tab ${tab === 'graph' ? 'active' : ''}`} data-tab="graph"><button role="tab" aria-selected={tab === 'graph'} onClick={() => setTab('graph')}><Workflow size={14}/>{graph.name}{dirty && savedGraph && <span className="dirty-dot"/>}</button></div>
+              {buffers.map(buffer => <div key={buffer.path} className={`editor-tab ${tab === 'code' && activeFile === buffer.path ? 'active' : ''}`} data-tab="file"><button role="tab" aria-selected={tab === 'code' && activeFile === buffer.path} title={buffer.path} onClick={() => { setActiveFile(buffer.path); setTab('code'); }}><FileCode2 size={14}/>{buffer.path.split('/').at(-1)}</button><button className={`tab-close ${buffer.content !== buffer.savedContent ? 'dirty' : ''}`} aria-label={`Close ${buffer.path}`} onClick={() => closeFile(buffer)}><X size={13}/></button></div>)}
+              {(diff || tab === 'diff') && <div className={`editor-tab ${tab === 'diff' ? 'active' : ''}`} data-tab="diff"><button role="tab" aria-selected={tab === 'diff'} onClick={() => setTab('diff')}><GitCompare size={14}/>Changes</button><button className="tab-close" aria-label="Close changes" onClick={() => { setDiff(undefined); if (tab === 'diff') setTab('graph'); }}><X size={13}/></button></div>}
+              {runId && <div className={`editor-tab ${tab === 'replay' ? 'active' : ''}`} data-tab="replay"><button role="tab" aria-selected={tab === 'replay'} onClick={() => setTab('replay')}><History size={14}/>Run {runId.slice(0, 8)}</button></div>}
+            </div>
+            <div className="editor-actions">
+              {tab === 'graph' && <>
+                <IconButton title="Undo" disabled={!undo.length} onClick={undoGraph}><Undo2 size={15}/></IconButton>
+                <IconButton title="Redo" disabled={!redo.length} onClick={redoGraph}><Redo2 size={15}/></IconButton>
+                <IconButton title="Import graph JSON" onClick={() => importInput.current?.click()}><Upload size={15}/></IconButton>
+                <IconButton title="Export graph JSON" onClick={exportGraph}><Download size={15}/></IconButton>
+                <IconButton title="Add node" onClick={() => { setPaletteQuery(''); setModal('palette'); }}><Plus size={16}/></IconButton>
+              </>}
+              {tab === 'diff' && <IconButton title="Refresh changes" onClick={refreshDiff}><RefreshCw size={14}/></IconButton>}
+              {tab === 'replay' && runId && <button className="text-action" disabled={busy || running} onClick={() => void act(async () => { const next = await api<Run>('rerun', { runId, confirmed: true }); setRuns(items => [next, ...items]); setRunId(next.id); setMessage('Created a new run from the recorded workflow.'); })}><Play size={12}/>Re-run as new run</button>}
+            </div>
           </div>
-          <aside className="inspector"><div className="inspector-title"><Settings2 size={14}/><strong>{selected ? 'Node configuration' : edge ? 'Connection' : 'Workflow settings'}</strong>{(selected || edge) && <button className="tiny" aria-label="Close inspector selection" onClick={() => { setSelectedId(undefined); setSelectedEdge(undefined); }}><X size={13}/></button>}</div><div className="inspector-scroll">{selected ? <><div className="inspector-node-kind"><span>{nodeIcons[selected.kind]}</span>{NODE_LABELS[selected.kind]}</div><Field label="Name"><input value={selected.label} onChange={event => changeNode({ label: event.target.value })}/></Field>
+
+          <div className="breadcrumbs">
+            {tab === 'graph' && <><span>{project?.name ?? 'workspace'}</span><ChevronRight size={12}/><span className="crumb-current">{graph.name}</span><span className="crumb-meta">r{graph.revision}{dirty ? ' · draft' : ''} · {graph.nodes.length} nodes · {graph.edges.length} connections</span>{running && <span className="crumb-live">Run pinned to r{inspection?.run.graph?.revision ?? graph.revision}</span>}</>}
+            {tab === 'code' && currentBuffer && <>{currentBuffer.path.split('/').map((part, index, parts) => <span key={index} className={index === parts.length - 1 ? 'crumb-current' : undefined}>{part}{index < parts.length - 1 && <ChevronRight size={12}/>}</span>)}<span className="crumb-meta"><GitBranch size={11}/>{project?.branch ?? (project ? 'Folder' : 'working tree')}</span></>}
+            {tab === 'diff' && <><span>Changes</span><span className="crumb-meta"><GitBranch size={11}/>{diff?.branch ?? project?.branch ?? (project ? 'Folder' : 'working tree')}</span></>}
+            {tab === 'replay' && <><span>Run</span><ChevronRight size={12}/><span className="crumb-current">{runId?.slice(0, 8) ?? '—'}</span><span className="crumb-meta"><span className={`state-dot ${inspection?.run.status ?? 'pending'}`}/>{inspection?.run.status.replaceAll('_', ' ') ?? 'loading'} · r{inspection?.run.graph?.revision ?? '—'} · {inspection?.checkpoints.length ?? 0} checkpoints · spending unavailable</span></>}
+          </div>
+
+          <div className="editor-body">
+            {tab === 'graph' && <div className="canvas" onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); const kind = event.dataTransfer.getData('application/nodal-node') as NodeKind; if (kinds.includes(kind)) addNode(kind, flowInstance.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY })); }}>
+              <ReactFlow onInit={instance => { flowInstance.current = instance; }} nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes} onNodeClick={(_event, node) => { setSelectedId(node.id); setSelectedEdge(undefined); }} onEdgeClick={(_event, item) => { setSelectedEdge(item.id); setSelectedId(undefined); }} onPaneClick={() => { setSelectedId(undefined); setSelectedIds([]); setSelectedEdge(undefined); }} onNodeDragStart={() => { dragSnapshot.current = structuredClone(graphRef.current); }} onNodeDragStop={() => { if (dragSnapshot.current) { const before = dragSnapshot.current; if (JSON.stringify(before.nodes.map(node => node.position)) !== JSON.stringify(graphRef.current.nodes.map(node => node.position))) { setUndo(items => [...items.slice(-49), before]); setRedo([]); } dragSnapshot.current = null; } }} onNodesChange={changes => { const changed = applyNodeChanges(changes, flowNodes); const dimensions = changes.filter(change => change.type === 'dimensions' && change.dimensions); if (dimensions.length) setNodeDimensions(old => ({ ...old, ...Object.fromEntries(dimensions.flatMap(change => change.type === 'dimensions' && change.dimensions ? [[change.id, change.dimensions]] : [])) })); if (changes.some(change => change.type === 'select')) setSelectedIds(changed.filter(node => node.selected).map(node => node.id)); if (changes.some(change => change.type === 'position')) setGraph(old => ({ ...old, nodes: old.nodes.map(node => ({ ...node, position: changed.find(item => item.id === node.id)?.position ?? node.position })) })); }} onEdgesChange={changes => { if (changes.some(change => change.type === 'remove')) { const remaining = applyEdgeChanges(changes, flowEdges); edit(old => ({ ...old, edges: old.edges.filter(item => remaining.some(next => next.id === item.id)) })); } }} onConnect={connectNodes} isValidConnection={connection => connection.source !== connection.target && graph.nodes.find(node => node.id === connection.source)?.kind !== 'end' && graph.nodes.find(node => node.id === connection.target)?.kind !== 'start'} deleteKeyCode={null} fitView fitViewOptions={{ padding: .25 }} minZoom={.25} maxZoom={1.6} colorMode="dark">
+                <Background variant={BackgroundVariant.Dots} color="#3a3a3a" gap={20} size={1}/>
+                <Controls showInteractive={false}/>
+                <MiniMap nodeColor="#3c3c3c" nodeStrokeColor="#555" maskColor="#1e1e1ecc" pannable zoomable/>
+              </ReactFlow>
+            </div>}
+            {tab === 'code' && !currentBuffer && <div className="folder-welcome"><FolderOpen size={32}/><h2>{project?.name ?? 'Open a folder'}</h2><p>{project ? 'Select a file in Explorer to start editing.' : 'Open a folder to browse and edit its files.'}</p>{!project && <button className="primary" onClick={openFolder}>Open Folder</button>}</div>}
+            {tab === 'code' && currentBuffer && <div className="code-pane">
+              {currentBuffer.external && <div className="info-bar">File changed on disk. Your edits are preserved.<button onClick={() => setTab('diff')}>Compare</button><button onClick={() => setBuffers(items => items.map(buffer => buffer.path === currentBuffer.path && buffer.external ? { ...buffer, content: buffer.external.content, savedContent: buffer.external.content, hash: buffer.external.hash, external: undefined } : buffer))}>Reload from disk</button></div>}
+              <Editor path={currentBuffer.path} language={language(currentBuffer.path)} value={currentBuffer.content} theme="vs-dark" onChange={value => setBuffers(items => items.map(buffer => buffer.path === activeFile ? { ...buffer, content: value ?? '' } : buffer))} options={{ editContext: false, fontSize: 13, lineHeight: 20, fontFamily: "'SF Mono', Menlo, Consolas, monospace", minimap: { enabled: false }, padding: { top: 8 }, scrollBeyondLastLine: false, automaticLayout: true, renderLineHighlight: 'line' }}/>
+            </div>}
+            {tab === 'diff' && <div className="scroll-pane">
+              {currentBuffer?.external ? <><div className="info-bar">Disk version → your unsaved buffer. Reload from the editor to discard your edits.</div><DiffEditor original={currentBuffer.external.content} modified={currentBuffer.content} language={language(currentBuffer.path)} theme="vs-dark" options={{ readOnly: true, minimap: { enabled: false }, automaticLayout: true }}/></> : <>
+                <section className="diff-section"><h3>Working tree</h3>{diff?.diff ? <DiffText text={diff.diff}/> : <p className="muted-line">{project?.isGitRepository === false ? 'Git diffs require a Git repository. File editing is available in Explorer.' : 'No changes in the main working tree.'}</p>}</section>
+                {diff?.worktrees?.map(tree => <section className="diff-section" key={tree.path}>
+                  <h3><GitBranch size={13}/>{tree.branch}<span>{tree.path}</span><button className="primary" disabled={busy || running || !tree.diff} onClick={() => void act(async () => { if (!window.confirm(`Apply the reviewed changes from ${tree.branch} to your repository? Your working tree must be clean. This creates a local integration commit.`)) return; await api('applyChanges', { runId, nodeId: tree.nodeId, expectedHead: tree.head, expectedSourceHead: tree.sourceHead, approved: true }); setDiff(await api<Diff>('diff', { projectId: project?.id, runId })); setMessage('Integrated approved changes into the repository.'); })}><Check size={13}/>Apply reviewed changes</button></h3>
+                  {tree.diff ? <DiffText text={tree.diff}/> : <p className="muted-line">No changes in this worktree.</p>}
+                </section>)}
+              </>}
+            </div>}
+            {tab === 'replay' && <div className="replay-pane">
+              <label className="replay-scrubber"><span>Recorded events</span><input type="range" min="0" max={events.length} value={Math.min(replayIndex, events.length)} onChange={event => setReplayIndex(Number(event.target.value))}/><span>{Math.min(replayIndex, events.length)} / {events.length}</span></label>
+              <div className="replay-events">{displayedEvents.map(event => <div className="replay-event" key={event.eventId}><time>{time(event.timestamp)}</time><span className={`state-dot ${event.kind.includes('failed') ? 'failed' : 'succeeded'}`}/><div><strong>{event.kind.replaceAll('_', ' ').replaceAll('.', ' › ')}</strong><small>{event.nodeId && inspection?.run.graph?.nodes.find(node => node.id === event.nodeId)?.label}</small><pre>{stringify(event.payload)}</pre></div></div>)}{!displayedEvents.length && <p className="muted-line">No events recorded yet.</p>}</div>
+            </div>}
+          </div>
+        </div>
+
+        {layout.panel && <>
+          <div className="sash horizontal" role="separator" aria-orientation="horizontal" aria-label="Resize panel" onPointerDown={resize('panel', 'y', -1)}/>
+          <section className="panel" style={{ height: sizes.panel }}>
+            <nav className="panel-tabs">
+              <button className={dock === 'events' ? 'selected' : ''} onClick={() => setDock('events')}>Timeline{events.length > 0 && <span className="badge">{events.length}</span>}</button>
+              <button className={dock === 'console' ? 'selected' : ''} onClick={() => setDock('console')}>Console</button>
+              <button className={dock === 'approvals' ? 'selected' : ''} onClick={() => setDock('approvals')}>Approvals{approvals.length > 0 && <span className="badge attention">{approvals.length}</span>}</button>
+              <span className="panel-status"><span className={`state-dot ${inspection?.run.status ?? 'pending'}`}/>{inspection?.run.status.replaceAll('_', ' ') ?? 'No active run'}</span>
+              <IconButton title="Close panel" onClick={() => setLayout(old => ({ ...old, panel: false }))}><X size={14}/></IconButton>
+            </nav>
+            <div className="panel-content">
+              {dock === 'approvals' ? approvals.length ? approvals.map(approval => <div key={approval.id} className="approval-item"><ShieldCheck size={16}/><div><strong>{graph.nodes.find(node => node.id === approval.nodeId)?.label ?? approval.nodeId}</strong><p>{approval.message ?? 'Review this node before continuing.'}</p><code>{stringify(approval.scope ?? {})}</code></div><button className="secondary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: false }); })}>Reject</button><button className="primary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: true }); })}>Approve</button></div>) : <p className="panel-empty">No pending approvals. Requests appear here when a run needs your decision.</p>
+                : dock === 'console' ? <pre className="console-output">{events.filter(event => (!selectedId || event.nodeId === selectedId) && /output|stream|log|tool|error|failed/.test(event.kind)).map(event => `${time(event.timestamp)}  ${event.kind}\n${stringify(event.payload)}`).join('\n\n') || (selectedId ? 'No output recorded for the selected node.' : 'Command output and provider events appear here. Select a node to filter.')}</pre>
+                : events.length ? [...events].reverse().slice(0, 150).map(event => <div className="timeline-row" key={event.eventId}><time>{time(event.timestamp)}</time><span className={`state-dot ${event.kind.includes('fail') ? 'failed' : event.kind.includes('approval') ? 'waiting_approval' : 'succeeded'}`}/><strong>{event.kind}</strong><span>{event.nodeId ? graph.nodes.find(node => node.id === event.nodeId)?.label ?? event.nodeId : 'Workflow'}</span><code>{stringify(event.payload)}</code></div>) : <p className="panel-empty">Run a workflow to see live events. Commands and provider actions are recorded as they happen.</p>}
+            </div>
+          </section>
+        </>}
+      </main>
+
+      {layout.inspector && <>
+        <div className="sash vertical" role="separator" aria-orientation="vertical" aria-label="Resize inspector" onPointerDown={resize('inspector', 'x', -1)}/>
+        <aside className="inspector" style={{ width: sizes.inspector }}>
+          <div className="view-title"><span>{selected ? 'Node' : edge ? 'Connection' : 'Workflow'}</span>{(selected || edge) && <IconButton title="Close inspector selection" onClick={() => { setSelectedId(undefined); setSelectedEdge(undefined); }}><X size={14}/></IconButton>}</div>
+          <div className="inspector-scroll">{selected ? <>
+            <div className="inspector-kind">{(() => { const Icon = nodeIcons[selected.kind]; return <Icon size={14}/>; })()}{NODE_LABELS[selected.kind]}</div>
+            <Field label="Name"><input value={selected.label} onChange={event => changeNode({ label: event.target.value })}/></Field>
             {selected.kind === 'agent' && <><Field label="Provider"><select value={selected.config.provider} onChange={event => changeConfig({ provider: event.target.value })}><option value="codex">OpenAI Codex</option><option value="claude">Claude</option><option value="demo">Demo — deterministic test fixture</option></select></Field><Field label="Model (optional)"><input value={selected.config.model ?? ''} placeholder="Provider default" onChange={event => changeConfig({ model: event.target.value || undefined })}/></Field><Field label="Instructions"><textarea rows={7} placeholder="Describe the task and acceptance criteria…" value={selected.config.instructions} onChange={event => changeConfig({ instructions: event.target.value })}/></Field><Field label="Workspace permission"><select value={selected.config.permission} onChange={event => changeConfig({ permission: event.target.value })}><option value="read-only">Read only</option><option value="scoped-edit">Scoped edit in isolated worktree</option></select></Field></>}
             {selected.kind === 'command' && <><Field label="Executable"><input value={selected.config.command} onChange={event => changeConfig({ command: event.target.value })}/></Field><Field label="Arguments (one per line)"><textarea rows={4} value={selected.config.args.join('\n')} onChange={event => changeConfig({ args: event.target.value.split('\n').filter(Boolean) })}/></Field><p className="field-help">Arguments are passed directly. Shell syntax is not expanded. Command execution requires approval.</p></>}
             {selected.kind === 'approval' && <Field label="Review instructions"><textarea rows={5} value={selected.config.message} onChange={event => changeConfig({ message: event.target.value })}/></Field>}
             {selected.kind === 'join' && <Field label="Wait for"><select value={selected.config.mode} onChange={event => changeConfig({ mode: event.target.value })}><option value="all_success">All branches succeed</option><option value="all_settled">All branches settle</option><option value="first_success">First successful branch</option></select></Field>}
             {(selected.kind === 'condition' || selected.kind === 'quality_gate') && <><Field label="Read output from"><select value={selected.config.predicate.sourceNodeId} onChange={event => changeConfig({ predicate: { ...selected.config.predicate, sourceNodeId: event.target.value } })}><option value="">Choose source node</option>{graph.nodes.filter(node => node.id !== selected.id).map(node => <option key={node.id} value={node.id}>{node.label}</option>)}</select></Field><Field label="Output field"><input value={selected.config.predicate.field} onChange={event => changeConfig({ predicate: { ...selected.config.predicate, field: event.target.value } })}/></Field><Field label="Comparison"><select value={selected.config.predicate.operator} onChange={event => changeConfig({ predicate: { ...selected.config.predicate, operator: event.target.value } })}>{['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'exists', 'contains'].map(operator => <option key={operator}>{operator}</option>)}</select></Field><Field label="Expected value"><input value={String(selected.config.predicate.value ?? '')} onChange={event => { let value: unknown = event.target.value; try { value = JSON.parse(event.target.value); } catch { /* A plain string is a valid comparison value. */ } changeConfig({ predicate: { ...selected.config.predicate, value } }); }}/></Field></>}
             {selected.kind === 'quality_gate' && <Field label="Maximum iterations"><input type="number" min="1" max="20" value={selected.config.maxIterations} onChange={event => changeConfig({ maxIterations: Number(event.target.value) })}/></Field>}
-            <div className="inspector-divider"/><Field label="Timeout (seconds)"><input type="number" min="1" value={selected.timeoutMs / 1000} onChange={event => changeNode({ timeoutMs: Number(event.target.value) * 1000 })}/></Field><Field label="Maximum attempts"><input type="number" min="1" max="10" value={selected.retry.maxAttempts} onChange={event => changeNode({ retry: { ...selected.retry, maxAttempts: Number(event.target.value) } })}/></Field><label className="check-field"><input type="checkbox" checked={selected.disabled} onChange={event => changeNode({ disabled: event.target.checked })}/>Disable this node</label><details><summary>Advanced configuration JSON</summary><textarea className="config-json" rows={10} value={configText} onChange={event => setConfigText(event.target.value)}/>{configError && <p className="inline-error">{configError}</p>}<button className="secondary" onClick={() => { try { const parsed = GraphSchema.parse({ ...graph, nodes: graph.nodes.map(node => node.id === selected.id ? { ...node, config: JSON.parse(configText) } : node) }); edit(parsed); setConfigError(''); } catch (cause) { setConfigError(String(cause)); } }}>Apply configuration</button></details><div className="node-actions"><button className="secondary" onClick={() => { clipboard.current = []; duplicate(); }}><Copy size={13}/>Duplicate</button><button className="danger quiet" onClick={deleteSelection}><Trash2 size={13}/>Delete</button></div>{inspection?.attempts.filter(attempt => attempt.nodeId === selected.id).map(attempt => <div key={attempt.id} className="attempt-card"><strong>Attempt {attempt.attemptIndex ?? 1} · {attempt.state}</strong><pre>{stringify(attempt.output ?? attempt.error ?? 'No output recorded')}</pre>{attempt.worktreePath && <small>{attempt.worktreePath}</small>}</div>)}</> : edge ? <><Field label="Connection type"><select value={edge.kind} onChange={event => edit(old => ({ ...old, edges: old.edges.map(item => item.id === edge.id ? { ...item, kind: event.target.value as 'control' | 'artifact' | 'loop' } : item) }))}><option value="control">Control flow</option><option value="artifact">Artifact dependency</option><option value="loop">Bounded quality loop</option></select></Field><p className="field-help">Loop edges must leave a quality gate. The gate enforces its iteration limit.</p><Field label="Source port"><input value={edge.sourcePort ?? ''} onChange={event => edit(old => ({ ...old, edges: old.edges.map(item => item.id === edge.id ? { ...item, sourcePort: event.target.value || undefined } : item) }))}/></Field><button className="quiet danger" onClick={deleteSelection}><Trash2 size={13}/>Delete connection</button></> : <><div className="inspector-intro"><Workflow size={24}/><h2>Shape the work.</h2><p>Select a node to configure its instructions, permissions, and execution limits.</p></div><Field label="Workflow name"><input value={graph.name} onChange={event => edit(old => ({ ...old, name: event.target.value }))}/></Field><Field label="Concurrent nodes"><input type="number" min="1" max="16" value={graph.settings.maxConcurrency} onChange={event => edit(old => ({ ...old, settings: { ...old.settings, maxConcurrency: Number(event.target.value) } }))}/></Field><Field label="Total attempt limit"><input type="number" min="1" max="2000" value={graph.settings.maxTotalAttempts} onChange={event => edit(old => ({ ...old, settings: { ...old.settings, maxTotalAttempts: Number(event.target.value) } }))}/></Field><Field label="Workflow timeout (minutes)"><input type="number" min="1" value={graph.settings.timeoutMs / 60000} onChange={event => edit(old => ({ ...old, settings: { ...old.settings, timeoutMs: Number(event.target.value) * 60000 } }))}/></Field><div className="inspector-divider"/><div className="validation-summary"><span className={`state-dot ${validation.valid ? 'succeeded' : 'failed'}`}/>{validation.valid ? 'Workflow is valid' : `${validation.errors.length} validation issues`}</div>{!validation.valid && <ul className="validation-list">{validation.errors.slice(0, 6).map((issue, index) => <li key={index}>{issue.message}</li>)}</ul>}<div className="trust-note"><ShieldCheck size={17}/><p>Local-first does not mean sandboxed. Review command and integration approvals before granting access.</p></div></>}</div></aside>
-        </div>
-        <section className="bottom-dock"><nav className="dock-tabs"><button className={dock === 'events' ? 'selected' : ''} onClick={() => setDock('events')}><History size={13}/>Timeline <span>{events.length}</span></button><button className={dock === 'console' ? 'selected' : ''} onClick={() => setDock('console')}><Terminal size={13}/>Node console</button><button className={dock === 'approvals' ? 'selected' : ''} onClick={() => setDock('approvals')}><ShieldCheck size={13}/>Approvals{approvals.length > 0 && <span className="approval-count">{approvals.length}</span>}</button><span className="dock-run-status"><span className={`state-dot ${inspection?.run.status ?? 'pending'}`}/>{inspection?.run.status.replaceAll('_', ' ') ?? 'No active run'}</span></nav><div className="dock-content">{dock === 'approvals' ? approvals.length ? approvals.map(approval => <div key={approval.id} className="approval-item"><ShieldCheck size={19}/><div><strong>{graph.nodes.find(node => node.id === approval.nodeId)?.label ?? approval.nodeId}</strong><p>{approval.message ?? 'Review this node before continuing.'}</p><p>{stringify(approval.scope ?? {})}</p></div><button className="quiet danger" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: false }); })}>Reject</button><button className="primary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: true }); })}><Check size={13}/>Approve</button></div>) : <div className="dock-empty"><ShieldCheck size={15}/>No pending approvals. Requests appear here when a run needs your decision.</div> : dock === 'console' ? <pre className="console-output">{events.filter(event => (!selectedId || event.nodeId === selectedId) && /output|stream|log|tool|error|failed/.test(event.kind)).map(event => `${new Date(event.timestamp).toLocaleTimeString()}  ${event.kind}\n${stringify(event.payload)}`).join('\n\n') || 'Select a node to filter its real command output and provider events.'}</pre> : events.length ? [...events].reverse().slice(0, 150).map(event => <div className="timeline-row" key={event.eventId}><time>{new Date(event.timestamp).toLocaleTimeString()}</time><span className={`state-dot ${event.kind.includes('fail') ? 'failed' : event.kind.includes('approval') ? 'waiting_approval' : 'succeeded'}`}/><strong>{event.kind}</strong><span>{event.nodeId ? graph.nodes.find(node => node.id === event.nodeId)?.label ?? event.nodeId : 'Workflow'}</span><code>{stringify(event.payload)}</code></div>) : <div className="dock-empty"><Circle size={13}/>Run a workflow to see live events. Commands and provider actions are recorded as they happen.</div>}</div></section>
-      </main>
+            <div className="inspector-group">Execution</div>
+            <div className="field-row"><Field label="Timeout (seconds)"><input type="number" min="1" value={selected.timeoutMs / 1000} onChange={event => changeNode({ timeoutMs: Number(event.target.value) * 1000 })}/></Field><Field label="Maximum attempts"><input type="number" min="1" max="10" value={selected.retry.maxAttempts} onChange={event => changeNode({ retry: { ...selected.retry, maxAttempts: Number(event.target.value) } })}/></Field></div>
+            <label className="check-field"><input type="checkbox" checked={selected.disabled} onChange={event => changeNode({ disabled: event.target.checked })}/>Disable this node</label>
+            <details><summary>Advanced configuration JSON</summary><textarea className="config-json" rows={10} value={configText} onChange={event => setConfigText(event.target.value)}/>{configError && <p className="inline-error">{configError}</p>}<button className="secondary" onClick={() => { try { const parsed = GraphSchema.parse({ ...graph, nodes: graph.nodes.map(node => node.id === selected.id ? { ...node, config: JSON.parse(configText) } : node) }); edit(parsed); setConfigError(''); } catch (cause) { setConfigError(String(cause)); } }}>Apply configuration</button></details>
+            <div className="node-actions"><button className="secondary" onClick={() => { clipboard.current = []; duplicate(); }}><Copy size={13}/>Duplicate</button><button className="secondary danger" onClick={deleteSelection}><Trash2 size={13}/>Delete</button></div>
+            {inspection?.attempts.some(attempt => attempt.nodeId === selected.id) && <div className="inspector-group">Attempts</div>}
+            {inspection?.attempts.filter(attempt => attempt.nodeId === selected.id).map(attempt => <div key={attempt.id} className="attempt-card"><div><span className={`state-dot ${attempt.state}`}/>Attempt {attempt.attemptIndex ?? 1} · {attempt.state.replaceAll('_', ' ')}</div><pre>{stringify(attempt.output ?? attempt.error ?? 'No output recorded')}</pre>{attempt.worktreePath && <small>{attempt.worktreePath}</small>}</div>)}
+          </> : edge ? <>
+            <Field label="Connection type"><select value={edge.kind} onChange={event => edit(old => ({ ...old, edges: old.edges.map(item => item.id === edge.id ? { ...item, kind: event.target.value as 'control' | 'artifact' | 'loop' } : item) }))}><option value="control">Control flow</option><option value="artifact">Artifact dependency</option><option value="loop">Bounded quality loop</option></select></Field>
+            <p className="field-help">Loop edges must leave a quality gate. The gate enforces its iteration limit.</p>
+            <Field label="Source port"><input value={edge.sourcePort ?? ''} onChange={event => edit(old => ({ ...old, edges: old.edges.map(item => item.id === edge.id ? { ...item, sourcePort: event.target.value || undefined } : item) }))}/></Field>
+            <div className="node-actions"><button className="secondary danger" onClick={deleteSelection}><Trash2 size={13}/>Delete connection</button></div>
+          </> : <>
+            <Field label="Workflow name"><input value={graph.name} onChange={event => edit(old => ({ ...old, name: event.target.value }))}/></Field>
+            <div className="field-row"><Field label="Concurrent nodes"><input type="number" min="1" max="16" value={graph.settings.maxConcurrency} onChange={event => edit(old => ({ ...old, settings: { ...old.settings, maxConcurrency: Number(event.target.value) } }))}/></Field><Field label="Total attempt limit"><input type="number" min="1" max="2000" value={graph.settings.maxTotalAttempts} onChange={event => edit(old => ({ ...old, settings: { ...old.settings, maxTotalAttempts: Number(event.target.value) } }))}/></Field></div>
+            <Field label="Workflow timeout (minutes)"><input type="number" min="1" value={graph.settings.timeoutMs / 60000} onChange={event => edit(old => ({ ...old, settings: { ...old.settings, timeoutMs: Number(event.target.value) * 60000 } }))}/></Field>
+            <div className="inspector-group">Validation</div>
+            <div className="validation-summary">{validation.valid ? <><CircleCheck size={14} className="ok"/>Workflow is valid</> : <><CircleX size={14} className="err"/>{validation.errors.length} validation issues</>}</div>
+            {!validation.valid && <ul className="validation-list">{validation.errors.slice(0, 6).map((issue, index) => <li key={index}>{issue.message}</li>)}</ul>}
+            <p className="trust-note">Local-first does not mean sandboxed. Review command and integration approvals before granting access.</p>
+            <p className="field-help">Select a node on the canvas to configure it.</p>
+          </>}</div>
+        </aside>
+      </>}
     </div>
-    <footer className="status-bar"><div><span className={`state-dot ${connected ? 'succeeded' : 'pending'}`}/>{busy ? 'Working…' : message}</div><div><GitBranch size={11}/>{project?.branch ?? 'No project'}<span className="status-separator"/>Usage: unavailable<span className="status-separator"/>Local workspace</div></footer>
+
+    <footer className="status-bar">
+      <div>
+        <span className="status-item"><span className={`state-dot ${connected ? 'succeeded' : 'pending'}`}/>{project?.name ?? 'No project'}</span>
+        <span className="status-item"><GitBranch size={12}/>{project?.branch ?? (project ? 'Folder' : '—')}</span>
+        <button className="status-item" title="Show validation" onClick={() => { setSelectedId(undefined); setSelectedEdge(undefined); setLayout(old => ({ ...old, inspector: true })); }}><CircleX size={12}/>{validation.valid ? 0 : validation.errors.length}</button>
+        {approvals.length > 0 && <button className="status-item" onClick={() => { setDock('approvals'); setLayout(old => ({ ...old, panel: true })); }}><ShieldCheck size={12}/>{approvals.length} awaiting approval</button>}
+        <span className="status-item status-message">{busy ? 'Working…' : message}</span>
+      </div>
+      <div><span className="status-item">Usage: unavailable</span><span className="status-item">Local workspace</span></div>
+    </footer>
+
+    {error && !modal && <div className="notification" role="alert"><CircleX size={15}/><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={14}/></button></div>}
     <input ref={importInput} type="file" accept="application/json,.json" hidden onChange={event => { const file = event.target.files?.[0]; if (file) void act(async () => { const imported = GraphSchema.parse(JSON.parse(await file.text())); edit(imported); setTab('graph'); setMessage('Imported workflow as a draft.'); }); event.target.value = ''; }}/>
-    {modal && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setModal(null); }}><section className={`modal ${modal === 'palette' ? 'command-palette' : ''}`} role="dialog" aria-modal="true" aria-label={modal === 'project' ? 'Open repository' : modal === 'generate' ? 'Generate workflow' : 'Add a node'}><button className="modal-close icon-button" aria-label="Close dialog" onClick={() => setModal(null)}><X size={17}/></button>
-      {modal === 'project' && <><span className="eyebrow">LOCAL WORKSPACE</span><h2>Open a repository</h2><p>Choose an existing Git repository. Files stay on this computer until you explicitly run a provider.</p><Field label="Repository path"><input autoFocus placeholder="/Users/you/projects/my-app" value={projectPath} onChange={event => setProjectPath(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void act(async () => { const next = await api<Project>('openProject', { path: projectPath }); await loadProject(next); setProjects(items => [...items.filter(item => item.id !== next.id), next]); setModal(null); }); }}/></Field><div className="dialog-actions"><button className="secondary" onClick={() => void act(async () => { if (!('__TAURI_INTERNALS__' in window)) throw new Error('Paste the full repository path above when running in a browser.'); const { open } = await import('@tauri-apps/plugin-dialog'); const selectedPath = await open({ directory: true, multiple: false, title: 'Choose a Git repository' }); if (typeof selectedPath === 'string') setProjectPath(selectedPath); })}><FolderOpen size={14}/>Browse</button><button className="primary" disabled={!projectPath || busy} onClick={() => void act(async () => { const next = await api<Project>('openProject', { path: projectPath }); await loadProject(next); setProjects(items => [...items.filter(item => item.id !== next.id), next]); setModal(null); })}>Open repository<ArrowUpRight size={14}/></button></div>{projects.length > 0 && <div className="recent-projects"><span className="eyebrow">RECENT REPOSITORIES</span>{projects.map(item => <button key={item.id} onClick={() => void act(async () => { await loadProject(item); setModal(null); })}><FolderOpen size={15}/><div><strong>{item.name}</strong><small>{item.root}</small></div><ChevronRight size={14}/></button>)}</div>}</>}
-      {modal === 'generate' && <><span className="eyebrow">WORKFLOW PLANNER</span><h2>Start with an intention.</h2><p>Describe the work. Review a validated graph before applying it to your canvas.</p><Field label="Planning provider"><select value={planningProvider} onChange={event => setPlanningProvider(event.target.value)}><option value="claude">Claude</option><option value="codex" disabled>Codex — tool-free planning unavailable</option></select></Field><Field label="What should this workflow do?"><textarea autoFocus rows={5} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Plan a fix, implement it with Codex, run regression tests, and ask for approval before merging…"/></Field><p className="provider-disclosure">Generating sends your prompt and current workflow configuration to the selected provider. It does not execute the generated workflow.</p>{generated && <div className="generated-preview"><strong>{generated.graph.name}</strong><p>{generated.summary}</p><span>{generated.graph.nodes.length} nodes · up to {generated.graph.settings.maxConcurrency} concurrent · {generated.graph.settings.maxTotalAttempts} attempts maximum</span><div>{generated.graph.nodes.map(node => <span key={node.id} className="preview-chip">{node.label}{node.kind === 'agent' ? ` · ${node.config.provider}` : ''}</span>)}</div><details><summary>Review generated graph JSON</summary><pre>{JSON.stringify(generated.graph, null, 2)}</pre></details></div>}<div className="dialog-actions"><button className="secondary" disabled={busy || !project || !prompt.trim()} onClick={() => void act(async () => { if (!project) return; const result = await api<{ graph: Graph; summary: string }>('generateGraph', { projectId: project.id, graph, prompt, provider: planningProvider }); const parsed = GraphSchema.parse(result.graph); const check = validateGraph(parsed); if (!check.valid) throw new Error(check.errors.map(issue => issue.message).join(' · ')); setGenerated({ ...result, graph: parsed }); })}><Sparkles size={14}/>{busy ? 'Generating…' : generated ? 'Generate again' : 'Generate preview'}</button><button className="primary" disabled={!generated || busy} onClick={() => { if (generated) { edit(generated.graph); setSelectedId(undefined); setTab('graph'); setModal(null); setMessage('Applied generated workflow as a draft. Review permissions before running.'); } }}><Check size={14}/>Apply to canvas</button></div>{!project && <p className="inline-error">Open a repository before generating a graph.</p>}</>}
-      {modal === 'palette' && <><label className="palette-search"><Search size={18}/><input autoFocus aria-label="Search node types" placeholder="Add a node to your workflow…" value={paletteQuery} onChange={event => setPaletteQuery(event.target.value)}/><kbd>esc</kbd></label><div className="palette-options">{kinds.filter(kind => NODE_LABELS[kind].toLowerCase().includes(paletteQuery.toLowerCase())).map(kind => <button draggable onDragStart={event => { event.dataTransfer.setData('application/nodal-node', kind); setModal(null); }} key={kind} onClick={() => addNode(kind)}><span className="palette-node-icon">{nodeIcons[kind]}</span><span>{NODE_LABELS[kind]}</span><Plus size={14}/></button>)}</div><div className="palette-footer">Choose a node or drag it onto the canvas.</div></>}
+    {modal && <div className={`modal-backdrop ${modal === 'palette' ? 'top' : ''}`} onMouseDown={event => { if (event.target === event.currentTarget) setModal(null); }}><section className={`modal ${modal === 'palette' ? 'quick-input' : ''}`} role="dialog" aria-modal="true" aria-label={modal === 'project' ? 'Open Folder' : modal === 'generate' ? 'Generate workflow' : 'Add a node'}>
+      {modal !== 'palette' && <div className="modal-header"><h2>{modal === 'project' ? 'Open Folder' : 'Generate workflow'}</h2><IconButton title="Close dialog" onClick={() => setModal(null)}><X size={15}/></IconButton></div>}
+      {modal === 'project' && <div className="modal-body">
+        <p>Choose any folder to browse and edit. Agent workflows require a Git repository with an initial commit.</p>
+        <Field label="Folder path"><input autoFocus placeholder="/Users/you/projects/my-app" value={projectPath} onChange={event => setProjectPath(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') openProjectPath(); }}/></Field>
+        <div className="dialog-actions">{isDesktop() && <button className="secondary" onClick={openFolder}>Browse…</button>}<button className="primary" disabled={!projectPath || busy} onClick={openProjectPath}>Open</button></div>
+        {projects.length > 0 && <div className="recent-projects"><div className="inspector-group">Recent</div>{projects.map(item => <button key={item.id} onClick={() => void act(async () => { if (await loadProject(item)) { explicitFolderChoice.current = true; setModal(null); setView('explorer'); setTab('code'); } })}><FolderOpen size={14}/><strong>{item.name}</strong><small>{item.root}</small></button>)}</div>}
+      </div>}
+      {modal === 'generate' && <div className="modal-body">
+        <p>Describe the work. You review a validated graph before it is applied to the canvas.</p>
+        <Field label="Planning provider"><select value={planningProvider} onChange={event => setPlanningProvider(event.target.value)}><option value="claude">Claude</option><option value="codex" disabled>Codex — tool-free planning unavailable</option></select></Field>
+        <Field label="What should this workflow do?"><textarea autoFocus rows={5} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Plan a fix, implement it with Codex, run regression tests, and ask for approval before merging…"/></Field>
+        <p className="field-help">Generating sends your prompt and current workflow configuration to the selected provider. It does not execute the generated workflow.</p>
+        {generated && <div className="generated-preview"><strong>{generated.graph.name}</strong><p>{generated.summary}</p><small>{generated.graph.nodes.length} nodes · up to {generated.graph.settings.maxConcurrency} concurrent · {generated.graph.settings.maxTotalAttempts} attempts maximum</small><div>{generated.graph.nodes.map(node => <span key={node.id} className="chip">{node.label}{node.kind === 'agent' ? ` · ${node.config.provider}` : ''}</span>)}</div><details><summary>Review generated graph JSON</summary><pre>{JSON.stringify(generated.graph, null, 2)}</pre></details></div>}
+        <div className="dialog-actions"><button className="secondary" disabled={busy || !project || !prompt.trim()} onClick={() => void act(async () => { if (!project) return; const result = await api<{ graph: Graph; summary: string }>('generateGraph', { projectId: project.id, graph, prompt, provider: planningProvider }); const parsed = GraphSchema.parse(result.graph); const check = validateGraph(parsed); if (!check.valid) throw new Error(check.errors.map(issue => issue.message).join(' · ')); setGenerated({ ...result, graph: parsed }); })}>{busy ? 'Generating…' : generated ? 'Generate again' : 'Generate preview'}</button><button className="primary" disabled={!generated || busy} onClick={() => { if (generated) { edit(generated.graph); setSelectedId(undefined); setTab('graph'); setModal(null); setMessage('Applied generated workflow as a draft. Review permissions before running.'); } }}>Apply to canvas</button></div>
+        {!project && <p className="inline-error">Open a repository before generating a graph.</p>}
+      </div>}
+      {modal === 'palette' && <>
+        <label className="palette-search"><input autoFocus aria-label="Search nodes and files" placeholder="Add a node or open a file" value={paletteQuery} onChange={event => setPaletteQuery(event.target.value)}/></label>
+        <div className="palette-options">
+          {paletteKinds.length > 0 && <div className="palette-group">Add node</div>}
+          {paletteKinds.map(kind => { const Icon = nodeIcons[kind]; return <button draggable onDragStart={event => { event.dataTransfer.setData('application/nodal-node', kind); setModal(null); }} key={kind} onClick={() => addNode(kind)}><Icon size={14}/><span>{NODE_LABELS[kind]}</span></button>; })}
+          {paletteFiles.length > 0 && <div className="palette-group">Files</div>}
+          {paletteFiles.map(path => <button key={path} onClick={() => openFile(path)}><FileCode2 size={14}/><span>{path.split('/').at(-1)}</span><small>{path}</small></button>)}
+          {!paletteKinds.length && !paletteFiles.length && <p className="panel-empty">No matching nodes or files.</p>}
+        </div>
+      </>}
       {error && <div className="inline-error" role="alert">{error}</div>}
     </section></div>}
   </div>;

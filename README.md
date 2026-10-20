@@ -1,87 +1,85 @@
 # Nodal
 
-*Build with agents. See every decision.*
+Nodal is a desktop coding workspace where you can edit files and build visual workflows for Claude and Codex. Open a folder, work in the editor, and connect agents, commands, tests, and approval steps on a canvas. You can follow each run as it happens, review the changes, and decide what to apply to your project.
 
-Nodal is a local desktop workspace for drawing and running coding workflows against Git repositories. It includes a React Flow editor, a real workflow scheduler, SQLite run history, Monaco file editing, isolated Git worktrees, approved command execution, and official Claude and Codex SDK adapters.
+It's an early, working version. The core editing and workflow features are in place, and the desktop app has been built on Apple Silicon macOS. Some editor features and release packaging are still unfinished; see [Known limitations](KNOWN_LIMITATIONS.md).
 
-This is a working MVP with disclosed gaps, not the complete acceptance matrix in the supplied specification. Read [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) before using it with important repositories.
+![Nodal showing a workflow and its execution history](docs/screenshots/nodal.png)
 
-![Nodal running a real local command](docs/screenshots/nodal.png)
+## What you can do
 
-## Requirements
+- **Open and edit local folders.** Browse files in Explorer, edit them with Monaco, and save changes to disk. The desktop app includes a native folder picker and separate workspace windows.
+- **Build workflows visually.** Add agents, commands, conditions, parallel branches, test checks, bounded retry loops, and human approvals. Start with a template or build your own graph.
+- **Run Claude and Codex.** Give each agent its instructions and permissions, then review the request before it starts.
+- **Review code before applying it.** Coding attempts run in separate Git worktrees. Inspect their diffs and explicitly approve changes before bringing them into your checkout.
+- **Keep track of what happened.** View streamed output, approvals, attempts, and saved run history. Replay a past run without executing it again.
 
-- Node.js **24 or later** (`node:sqlite` is required), pnpm 11, and Git.
-- For the macOS desktop app: Rust/Cargo and Xcode Command Line Tools. The browser development app does not require Rust.
-- Optional provider access through the official Codex or Claude login. A local login does not guarantee model entitlement or remaining usage.
+You can browse and edit any existing folder. Running a workflow requires opening the root of a Git repository with at least one commit.
 
-## Launch
+## Run from source
 
-From the repository root:
+You'll need **Node.js 24 or later**, **pnpm 11**, and **Git**. The desktop app also needs **Rust/Cargo** and the native build tools for your platform. On macOS, install Xcode Command Line Tools.
 
 ```sh
+git clone https://github.com/asoncode/Nodal_IDE.git
+cd Nodal_IDE
 pnpm install
-pnpm dev
-```
-
-Open the **local URL printed by this command**, including its initial fragment. The fragment carries a random per-launch connection token; the app removes it from the address bar and keeps it in memory. Do not share that URL. Reloading browser mode requires reopening the printed launch URL.
-
-For the native desktop app, with Rust/Cargo available on `PATH`:
-
-```sh
 pnpm desktop
 ```
 
-To package the current platform:
+This starts the desktop app in development mode. You don't need a provider account to edit files or run local command workflows.
+
+To run the browser version instead:
 
 ```sh
-pnpm desktop:build
+pnpm dev
 ```
 
-On macOS the bundle is written to `apps/desktop/src-tauri/target/release/bundle/macos/Nodal.app`. It contains its own Node executable and the installed provider SDK dependencies. The bundle is large (approximately 745 MiB in the verified Apple Silicon build). It is a local unsigned build; signing, notarization, distribution installers, and other OS builds are not verified.
+Open the full URL printed in the terminal. It includes a temporary connection token that the app removes from the address bar after connecting. Keep that URL private and reopen it if you reload the browser. Run either browser or desktop development mode at a time; both use port 5173.
 
-If a GUI launch cannot find Node in development, set `NODAL_NODE` to its absolute path. Release bundles use their packaged Node executable. Stop `pnpm dev` before `pnpm desktop`; both use frontend port 5173. This workspace also has a project-local Rust toolchain under `.nodal/tools`, which the desktop launcher detects automatically; it does not change your global toolchain.
+## Open a folder and start editing
 
-## First run without provider access
+In the desktop app, choose **File → Open Folder…**, then select a folder. Click a file in Explorer to open it and choose **File → Save** when you're ready to save.
+
+| Action | macOS | Windows / Linux shortcut |
+| --- | --- | --- |
+| Open folder | `⌘O` | `Ctrl+O` |
+| Save | `⌘S` | `Ctrl+S` |
+| New window | `⌘⇧N` | `Ctrl+Shift+N` |
+
+Each new window starts with an empty workspace and has its own folder and editor tabs. Nodal asks before discarding unsaved file or workflow edits when you switch folders or close a window. In browser mode, the Explorer folder button lets you enter a full local path.
+
+File saves check whether the file has changed on disk since you opened it. If another editor changes it, Nodal lets you compare the versions rather than silently overwriting the changes.
+
+## Try a workflow without an AI account
+
+Create the included example project:
 
 ```sh
 pnpm example
 ```
 
-This creates a new Git repository at `.nodal/example-project` with two intentionally failing tests. Supply a new directory as an argument to choose another location. Existing directories are never overwritten.
+This creates `.nodal/example-project`, a small Git repository with two intentionally failing tests. It won't overwrite an existing directory.
 
-1. Open that repository in Nodal. Browser mode accepts a full path; the native app also has a folder picker.
-2. Choose **Local command**, select its command node, and inspect the executable and arguments.
-3. Save the workflow, then run it. Open **Approvals** and review the command and host-execution warning before approving.
-4. Inspect the actual version output in **Node console**, and the completed attempt in **Run replay**.
-5. Open `add.js`, change subtraction to addition, and save. **Changes** shows the Git diff. File writes compare the original disk hash so external changes cannot be silently overwritten.
+1. Open that folder in Nodal.
+2. Choose **Workflows** in the activity bar, then select **Local command**.
+3. Inspect the command node, save the workflow, and run it.
+4. Open **Approvals**, review the command, and approve it.
+5. Check the real process output in the panel's **Console** tab.
 
-Commands and coding attempts execute from committed Git snapshots in separate worktrees. Unsaved buffers and uncommitted main-working-tree changes are not included. Commit reviewed manual changes in your repository before using them as a workflow's base.
+You can also open `add.js`, fix the subtraction, and save it. The **Source control** view shows your edit. Workflow attempts start from committed files, so commit any manual changes you want the next run to use.
 
-Run an automated genuine test-fix loop without paid provider access:
+For an automated example that runs real tests and retries after a failure:
 
 ```sh
 pnpm demo:quality-loop
 ```
 
-This explicitly labeled deterministic fixture runs real Node tests, records a failing attempt, retries through a bounded quality gate, repairs a real file, and records passing tests. It does not present fixture behavior as a real coding agent.
+This demo uses a deterministic command fixture, not an AI provider, so it doesn't consume model usage.
 
-## Coding workflows
+## Connect Claude or Codex
 
-The editable **Feature Builder**, **Parallel Fullstack**, and **Bug Hunt** templates assign real Claude/Codex nodes. Configure instructions for your task, check every command, and validate before running. Models default to each SDK's configured model; the inspector accepts an explicit model ID.
-
-Agent permissions begin read-only. Scoped edit authorizes changes inside the attempt worktree; Codex's workspace-write sandbox also permits sandboxed commands. Every provider request asks approval before sending task and repository context. Every command attempt asks approval regardless of graph-supplied permission flags.
-
-A quality gate evaluates structured results such as a test command's actual exit code. A failing machine check cannot be overridden by a reviewer opinion. Every retry retains its own attempt. Parallel nodes use independent branches, and an explicit Merge node reconciles them into another isolated integration worktree.
-
-To apply work to the chosen repository, finish or stop the run, open **Changes**, refresh, review the branch diff, then choose **Apply reviewed changes**. The runtime checks both reviewed commits and requires a clean destination. Conflicts are reported and aborted; attempt branches remain available. Configure and approve integration tests after reconciliation; tests are not automatically run after the separate main-worktree Apply action.
-
-Pause blocks new scheduling at safe boundaries. Stop aborts active sessions/processes and prevents further nodes from starting. Worktrees survive cancellation. Historical replay reads saved events and never executes them. Re-run creates a new run from the saved workflow against the repository's current committed HEAD, with fresh permission requests.
-
-**Generate** uses Claude in tool-free mode to propose schema-validated graph JSON. Generation sends your prompt and current graph configuration to the provider. Preview the nodes, limits, commands, and permissions before applying. Invalid output receives at most one correction attempt. Codex graph planning is unavailable because this SDK cannot enforce a tool-free turn.
-
-## Provider authentication and verification
-
-Use official authentication outside Nodal:
+Sign in through the provider's official CLI, then check whether Nodal can use it:
 
 ```sh
 codex login
@@ -90,26 +88,39 @@ pnpm verify:provider codex
 pnpm verify:provider claude
 ```
 
-Availability checks use installed native binaries and local login status without a model request. Nodal does not request passwords, scrape browser sessions, provision keys, or save credentials in SQLite or renderer storage. See [docs/PROVIDERS.md](docs/PROVIDERS.md) for policy details.
+You only need to sign in to the providers you plan to use. Nodal doesn't collect your password or store provider credentials in its database. A successful login doesn't guarantee model access or available usage. See [Provider setup](docs/PROVIDERS.md) for details and optional live checks.
 
-Explicit live verification, which may consume provider usage:
+The **Feature Builder**, **Parallel Fullstack**, and **Bug Hunt** templates include agent nodes. Set their instructions, choose a model if needed, and review their permissions before running. The **Generate** feature can also use Claude to propose a workflow; you review the preview before applying it.
+
+## How runs affect your code
+
+A workflow runs from a committed snapshot of your repository. Coding attempts use isolated Git worktrees, so unsaved editor buffers and uncommitted changes in your main checkout aren't part of the run.
+
+Commands and provider requests require approval. You can inspect output and diffs as the run progresses, pause new work, or stop the run. Stopping preserves worktrees for inspection. To bring a completed result into your checkout, review its diff and choose **Apply reviewed changes**. Nodal checks for a clean destination and aborts on a merge conflict.
+
+Approved commands run with your operating-system user permissions. Nodal is meant for trusted local code; it does not provide a hardened sandbox for untrusted programs.
+
+Run history is stored locally in `~/.local/share/nodal`. Set `NODAL_DATA_DIR` to use another directory. This data can include prompts, code, and command output, so treat it as private project data. The [Operator guide](docs/OPERATOR_GUIDE.md) covers recovery, worktrees, backups, and troubleshooting.
+
+## Build the desktop app
 
 ```sh
-pnpm verify:provider codex --live /absolute/path/to/repository
-pnpm verify:provider claude --live /absolute/path/to/repository
+pnpm desktop:build
 ```
 
-Both adapters were verified with genuine streamed marker turns. A live Codex coding/test/approval/integration workflow and a live tool-free Claude graph preview also passed in disposable repositories. Reproducible opt-in scripts are listed in [docs/TESTING.md](docs/TESTING.md). That confirms the installed SDK/authentication path, not broad provider reliability or sandbox certification. Missing dollar telemetry remains unavailable.
+On macOS, the app is written to:
 
-## Local data and security
+```text
+apps/desktop/src-tauri/target/release/bundle/macos/Nodal.app
+```
 
-The default data directory is `~/.local/share/nodal` on all platforms. Set `NODAL_DATA_DIR` to choose another location. It contains `nodal.sqlite` (WAL), bounded diff artifacts under `artifacts/`, preserved attempt directories under `worktrees/`, and an empty planning scratch directory. Workflow history includes prompts, outputs, source references, and potentially private code. Protect this directory like a repository. Back it up only while the app is stopped, or use a proper SQLite online backup.
+You can open this app directly. It bundles Node and the provider SDK dependencies, so the verified Apple Silicon build is about 745 MiB. It's currently an unsigned local build. There are no published installers or automatic updates, and Windows/Linux builds haven't been verified. Native menu and folder-picker interaction still needs manual testing; the shared renderer has automated browser coverage.
 
-**Local-first does not mean sandboxed.** The approved command runner executes with your OS user privileges, including host filesystem and network access. It uses argument arrays and process-group cancellation, but is not a container, microVM, network policy, or resource-quota boundary. Use trusted code only. Nodal never pushes, publishes, resets, cleans, or deletes branches automatically.
+For development launch issues, see the [Operator guide](docs/OPERATOR_GUIDE.md). Release builds use their bundled Node executable.
 
-The renderer has no direct shell/filesystem Tauri capability. The sidecar binds only `127.0.0.1`, validates Host and Origin, requires a random token, and validates request bodies. File access rejects traversal, symlink components, and hard links. Automatic task commits reject known credential paths. Common secrets are redacted from events, but no heuristic can detect every secret in arbitrary code.
+## Development
 
-## Development and tests
+The app uses React, React Flow, and Monaco inside a Tauri desktop shell. A local Node service runs workflows and stores their history in SQLite.
 
 ```sh
 pnpm lint
@@ -118,9 +129,13 @@ pnpm test
 pnpm build
 pnpm verify:bundle
 pnpm test:e2e
-pnpm demo:quality-loop
 ```
 
-`test:e2e` uses the gstack browse skill, as required by the workspace instructions; set `NODAL_BROWSE_BIN` when it is installed elsewhere. It opens a separate production preview on loopback port 5174 and a temporary Git repository. See [docs/TESTING.md](docs/TESTING.md) for coverage and verification boundaries, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for package/process design, and [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) for recovery and troubleshooting.
+The browser E2E check uses the gstack browse CLI. Install it or set `NODAL_BROWSE_BIN` to its executable. Full coverage and live-provider verification instructions are in [Testing](docs/TESTING.md).
 
-The source remains organized as `apps/desktop`, `packages/{shared,core,runtime,persistence,workspace,providers}`, `examples`, `scripts`, and `docs`. The original supplied product specification is preserved in `FORGE_CODEX_BUILD_SPEC.md`; all application code, data paths, UI, and new documentation use Nodal.
+- [Architecture](docs/ARCHITECTURE.md) — processes, packages, scheduling, and persistence.
+- [Provider setup](docs/PROVIDERS.md) — authentication, permissions, and SDK behavior.
+- [Operator guide](docs/OPERATOR_GUIDE.md) — using and troubleshooting the app.
+- [Known limitations](KNOWN_LIMITATIONS.md) — what's partial or still missing.
+
+Source code lives in `apps/desktop` and `packages/{shared,core,runtime,persistence,workspace,providers}`. The original build specification is kept in `FORGE_CODEX_BUILD_SPEC.md` as a historical reference; the application is named Nodal.

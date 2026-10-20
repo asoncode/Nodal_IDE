@@ -1,19 +1,21 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act as reactAct, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import App from './App.js';
 import { api } from './api.js';
+import { isDesktop, pickFolder, restoreLastProject, listenDesktopActions } from './desktop.js';
 import { createNode, emptyGraph, type Graph } from './model.js';
 
 vi.mock('./api.js', () => ({ api: vi.fn() }));
+vi.mock('./desktop.js', () => ({ isDesktop: vi.fn(), pickFolder: vi.fn(), restoreLastProject: vi.fn(), listenDesktopActions: vi.fn() }));
 vi.mock('@monaco-editor/react', () => ({
   default: ({ value, onChange }: { value: string; onChange: (value: string) => void }) => <textarea aria-label="Source editor" value={value} onChange={event => onChange(event.target.value)}/>,
   DiffEditor: ({ original, modified }: { original: string; modified: string }) => <div aria-label="File comparison">{original} → {modified}</div>,
 }));
 vi.mock('@xyflow/react', () => ({
   ReactFlow: ({ nodes, onNodeClick, children }: { nodes: { id: string; data: { node: { label: string } } }[]; onNodeClick: (event: unknown, node: { id: string }) => void; children: React.ReactNode }) => <div aria-label="Workflow graph">{nodes.map(node => <button key={node.id} onClick={() => onNodeClick({}, node)}>{node.data.node.label}</button>)}{children}</div>,
-  Background: () => null, Controls: () => null, MiniMap: () => null, Handle: () => null,
+  Background: () => null, BackgroundVariant: { Dots: 'dots' }, Controls: () => null, MiniMap: () => null, Handle: () => null,
   Position: { Left: 'left', Right: 'right' }, applyNodeChanges: vi.fn(), applyEdgeChanges: vi.fn(),
 }));
 
@@ -23,6 +25,7 @@ let calls: { method: string; params: Record<string, unknown> }[];
 let generation: Graph;
 
 beforeEach(() => {
+  vi.mocked(isDesktop).mockReturnValue(false); vi.mocked(pickFolder).mockResolvedValue(null); vi.mocked(restoreLastProject).mockResolvedValue(true); vi.mocked(listenDesktopActions).mockResolvedValue(() => {});
   graph = emptyGraph(); graph.name = 'Command workflow';
   const command = createNode('command', 1); command.id = 'command-1'; command.label = 'Check Node';
   graph.nodes.splice(1, 0, command);
@@ -32,7 +35,8 @@ beforeEach(() => {
   vi.mocked(api).mockImplementation(async <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
     calls.push({ method, params });
     const results: Record<string, unknown> = {
-      bootstrap: { projects: [project], templates: [], providers: [] }, files: ['src/example.ts'], listGraphs: [graph], runs: [],
+      bootstrap: { projects: [project], templates: [], providers: [] }, files: params.projectId === 'plain-folder' ? ['notes.txt'] : ['src/example.ts'], listGraphs: params.projectId === 'plain-folder' ? [] : [graph], runs: [],
+      openProject: { id: 'plain-folder', name: 'plain-folder', root: '/tmp/plain-folder', isGitRepository: false },
       readFile: { content: 'export const answer = 1;', hash: 'a'.repeat(64) }, writeFile: { content: params.content, hash: 'b'.repeat(64) },
       saveGraph: params.graph, generateGraph: { graph: generation, summary: 'A validated plan.' },
       run: { id: 'run-1', projectId: project.id, graph, status: 'running', createdAt: new Date().toISOString() },
@@ -44,7 +48,7 @@ beforeEach(() => {
     return results[method] as T;
   });
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.restoreAllMocks(); });
 
 async function ready() {
   render(<App/>);
@@ -119,4 +123,56 @@ describe('workspace flows', () => {
     expect(screen.getByLabelText('Workflow name')).toHaveProperty('value', 'Generated plan');
     expect(screen.queryByRole('dialog')).toBeNull();
   });
+
+  it('opens the native folder chooser directly and shows ordinary folder files', async () => {
+    vi.mocked(isDesktop).mockReturnValue(true); vi.mocked(pickFolder).mockResolvedValue('/tmp/plain-folder');
+    await ready(); fireEvent.click(screen.getByRole('button', { name: 'Open Folder' }));
+    await screen.findByRole('button', { name: 'notes.txt' });
+    expect(pickFolder).toHaveBeenCalledOnce(); expect(calls.find(call => call.method === 'openProject')?.params).toEqual({ path: '/tmp/plain-folder' });
+    expect(screen.queryByRole('dialog', { name: 'Open Folder' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Check Node' })).toBeNull();
+    await screen.findByText('Select a file in Explorer to start editing.');
+  });
+
+  it('treats native chooser cancellation as a no-op', async () => {
+    vi.mocked(isDesktop).mockReturnValue(true); await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Folder' }));
+    await waitFor(() => expect(pickFolder).toHaveBeenCalledOnce());
+    expect(calls.some(call => call.method === 'openProject')).toBe(false); expect(screen.getByRole('button', { name: 'src/example.ts' })).toBeTruthy();
+  });
+
+  it('keeps unsaved code when another folder is declined', async () => {
+    vi.mocked(isDesktop).mockReturnValue(true); vi.mocked(pickFolder).mockResolvedValue('/tmp/plain-folder'); vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await ready(); fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' }));
+    const editor = await screen.findByRole('textbox', { name: 'Source editor' }); fireEvent.change(editor, { target: { value: 'unsaved code' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Open Folder' }));
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledWith('Discard unsaved edits and open another folder?'));
+    expect(calls.some(call => call.method === 'openProject')).toBe(false); expect(editor).toHaveProperty('value', 'unsaved code');
+  });
+
+  it('leaves a New Window empty instead of restoring another window’s project', async () => {
+    vi.mocked(restoreLastProject).mockResolvedValue(false); render(<App/>);
+    await screen.findByRole('heading', { name: 'Open a folder' });
+    expect(calls.some(call => call.method === 'files' || call.method === 'listGraphs')).toBe(false);
+    expect(screen.queryByRole('button', { name: 'src/example.ts' })).toBeNull();
+  });
+
+  it('handles native Save using the latest buffer and avoids duplicate keyboard saves', async () => {
+    vi.mocked(isDesktop).mockReturnValue(true); await ready();
+    const handlers = vi.mocked(listenDesktopActions).mock.calls[0][0];
+    fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' }));
+    const editor = await screen.findByRole('textbox', { name: 'Source editor' }); fireEvent.change(editor, { target: { value: 'updated code' } });
+    fireEvent.keyDown(window, { key: 's', metaKey: true }); expect(calls.some(call => call.method === 'writeFile')).toBe(false);
+    await reactAct(async () => handlers.save());
+    await waitFor(() => expect(calls.filter(call => call.method === 'writeFile')).toHaveLength(1));
+    expect(calls.find(call => call.method === 'writeFile')?.params.content).toBe('updated code');
+  });
+
+  it('protects dirty files when the native window closes', async () => {
+    await ready(); const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const handlers = vi.mocked(listenDesktopActions).mock.calls[0][0]; expect(handlers.canClose()).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' })); const editor = await screen.findByRole('textbox', { name: 'Source editor' });
+    fireEvent.change(editor, { target: { value: 'unsaved code' } }); expect(handlers.canClose()).toBe(false); expect(confirm).toHaveBeenCalledOnce();
+  });
+
 });

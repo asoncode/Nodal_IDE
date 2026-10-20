@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GraphSchema, createNode, type Graph } from '../../packages/shared/src/index.js';
@@ -25,6 +25,24 @@ beforeEach(async () => {
 });
 afterEach(async () => { await service.close(); store.close(); await rm(root,{recursive:true,force:true}); });
 describe('real workflow vertical slice', () => {
+  it('opens an ordinary folder and edits files without initializing Git', async () => {
+    const folder = join(root, 'plain-folder'); await mkdir(folder); await writeFile(join(folder, 'notes.txt'), 'hello');
+    const opened = await service.dispatch('openProject', { path: folder }) as { id: string; isGitRepository: boolean };
+    expect(opened.isGitRepository).toBe(false);
+    expect(await service.dispatch('files', { projectId: opened.id })).toEqual(['notes.txt']);
+    const file = await service.dispatch('readFile', { projectId: opened.id, path: 'notes.txt' }) as { hash: string };
+    await service.dispatch('writeFile', { projectId: opened.id, path: 'notes.txt', content: 'edited', expectedHash: file.hash });
+    expect(await readFile(join(folder, 'notes.txt'), 'utf8')).toBe('edited');
+    await expect(readFile(join(folder, '.git', 'HEAD'))).rejects.toThrow();
+    await expect(service.startRun(opened.id, graph())).rejects.toThrow('Git repository with an initial commit');
+    expect(store.runs(opened.id)).toHaveLength(0);
+    expect(await service.dispatch('diff', { projectId: opened.id })).toMatchObject({ diff: '', worktrees: [], branch: 'Folder — Git not initialized' });
+  });
+  it('rejects selecting a file instead of a folder', async () => {
+    await expect(service.dispatch('openProject', { path: join(root, 'hello.txt') })).rejects.toThrow('Choose a folder');
+    expect(store.projects()).toHaveLength(1);
+  });
+
   it('edits a local file with optimistic locking and round-trips graph layouts', async () => {
     const original=await service.dispatch('readFile',{projectId,path:'hello.txt'}) as {hash:string};
     await service.dispatch('writeFile',{projectId,path:'hello.txt',expectedHash:original.hash,content:'edited\n'});

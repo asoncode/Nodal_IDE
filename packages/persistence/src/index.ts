@@ -17,7 +17,7 @@ export function redact<T>(value: T): T {
 }
 const json = (value: unknown) => JSON.stringify(redact(value));
 const now = () => new Date().toISOString();
-export interface Project { id: string; name: string; root: string; createdAt: string; branch?: string }
+export interface Project { id: string; name: string; root: string; createdAt: string; branch?: string; isGitRepository?: boolean }
 export type StoredRun = Partial<WorkflowRun> & { id: string; projectId: string; graph: Graph; status: string; createdAt: string; repositorySha?: string; parentRunId?: string };
 
 export class Store {
@@ -62,9 +62,9 @@ export class Store {
   }
   projects(): Project[] { return this.many('SELECT json FROM projects ORDER BY rowid DESC'); }
   project(id: string): Project { const p = this.one<Project>('SELECT json FROM projects WHERE id=?', id); if (!p) throw new Error('Project not found'); return p; }
-  addProject(root: string, name: string, branch?: string): Project {
+  addProject(root: string, name: string, branch?: string, isGitRepository = true): Project {
     const existing = this.one<Project>('SELECT json FROM projects WHERE repository_root=?', root);
-    const p: Project = existing ? { ...existing, branch } : { id: randomUUID(), root, name, branch, createdAt: now() };
+    const p: Project = existing ? { ...existing, branch, isGitRepository } : { id: randomUUID(), root, name, branch, isGitRepository, createdAt: now() };
     this.db.prepare('INSERT INTO projects VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(p.id, root, json(p)); return p;
   }
   saveGraph(projectId: string, graph: Graph): Graph {
