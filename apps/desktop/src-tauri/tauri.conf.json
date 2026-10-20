@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nodal",
+  "version": "0.1.0",
+  "identifier": "dev.nodal.desktop",
+  "build": {
+    "beforeDevCommand": {
+      "script": "pnpm build:runtime && pnpm dev:ui",
+      "cwd": "../.."
+    },
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": {
+      "script": "pnpm build && pnpm stage:desktop",
+      "cwd": "../.."
+    },
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Nodal",
+        "width": 1500,
+        "height": 960,
+        "minWidth": 1000,
+        "minHeight": 650
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src ipc: http://ipc.localhost http://127.0.0.1:*; worker-src 'self' blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "resources": {
+      "sidecar/": "sidecar/"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

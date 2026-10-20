@@ -1,0 +1,10 @@
+{
+  "name": "@nodal/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@nodal/shared": "workspace:*",
+    "@nodal/core": "workspace:*"
+  }
+}
