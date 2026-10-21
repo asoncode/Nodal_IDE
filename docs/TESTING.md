@@ -2,7 +2,7 @@
 
 ## Automated checks
 
-`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 85 unit/integration/UI cases across eight files.
+`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 134 unit/integration/UI cases.
 
 Coverage includes deterministic predicate evaluation, graph validation and templates, topological readiness, skipped branches, parallel concurrency, all join policies, retry readiness races, bounded loops with feedback evidence, iteration limits, cancellation during delayed retries, pause/resume boundaries, node/run timeout, approvals, journal failures, and interruption recovery.
 
@@ -10,7 +10,7 @@ Real temporary-Git-repository integration cases exercise file hashes, traversal/
 
 Folder-opening checks cover ordinary folders without Git initialization, file-path rejection, native picker cancellation, keeping dirty buffers when a switch is declined, empty new windows, native Save using the latest editor state without duplicate keyboard writes, window-close confirmation, and listener cleanup. Native event and dialog tests use explicit Tauri mocks; they do not replace OS menu/picker interaction testing.
 
-`pnpm build` compiles the renderer and Node runtime. `pnpm verify:bundle` starts the actual compiled sidecar with a temporary data directory, verifies its private handshake and authenticated desktop-origin API, checks initialized SQLite/templates, then verifies graceful shutdown. This catches bundler errors that TypeScript source tests cannot detect.
+`pnpm build` compiles the renderer and Node runtime. `pnpm verify:bundle` starts the actual compiled sidecar with a temporary data directory, verifies its private handshake and authenticated desktop-origin API, checks initialized SQLite/templates, opens a real PTY, runs a command, resizes and closes it, then verifies graceful shutdown. Set `NODAL_VERIFY_SIDECAR` to a packaged sidecar directory to run the same checks with its bundled Node executable. This catches bundler and native-module errors that TypeScript source tests cannot detect.
 
 `pnpm demo:quality-loop` runs a genuine two-iteration test-fix loop in disposable worktrees. All provider behavior is explicitly absent: a deterministic command fixture fixes the sample on its second attempt. It asserts failed→succeeded test history, real loop events, and unchanged main-working-tree content.
 
@@ -35,3 +35,19 @@ Automated provider tests use explicit SDK mocks. No mock status is shown as a re
 The local Apple Silicon Rust toolchain successfully ran `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`. `pnpm desktop:build` packages the renderer, Rust shell, Node executable, and official SDK dependencies into a macOS `.app`. Native visual inspection could not be completed because the computer-use Accessibility/Screen Recording permissions were pending; browser E2E covers the shared renderer.
 
 There is no published performance baseline and no claim of cross-platform verification. See [KNOWN_LIMITATIONS.md](../KNOWN_LIMITATIONS.md) for the remaining acceptance gaps.
+
+## Chat checks
+
+The chat suite uses explicit provider mocks and real temporary Git repositories. It checks per-turn consent, project ownership, independent node/run context, successful provider continuation, failed-session reset, overlapping sends, exact command approval IDs, cancellation while waiting for approval, restart recovery without replay, worktree isolation, and stale-head integration rejection. Provider policy tests verify Bash is unavailable to ordinary/read-only turns and that editing-chat commands pass through the approval hook.
+
+Sidebar tests cover saved history, provider/model selection from a workflow node, send errors, stopping, IME composition, stale polling responses, and cumulative text replacement. Browser E2E seeds an explicitly labeled completed chat fixture to exercise the actual API and renderer without model usage, checks provider/access controls and draft-only behavior, captures `docs/screenshots/chat.png`, and checks the minimum desktop width.
+
+Attachment checks verify that referenced/uploaded contents reach the provider prompt, saved references remain snapshots after disk changes, uploads don't create repository files, and attachment history persists with redaction. Invalid paths, symlinks, credential-like paths, binary formats, excessive counts, UTF-8 byte sizes, and aggregate limits are rejected before provider execution. Composer tests cover keyboard @ selection, reference removal, upload contents, file-only messages, failed-send preservation, unsupported uploads, email-address handling, and Escape dismissal. Browser E2E selects a real reference, uploads an external text fixture, removes/re-adds it, and checks the Send button remains visible at the minimum desktop size without making a model request.
+
+## Terminal checks
+
+Terminal tests exercise real PTYs and mocked xterm rendering: project/window ownership, explicit shell creation, ordered input with UTF-8 byte limits, cursor-based output, truncation resets, renderer backpressure, resizing, exit status, hidden-tab persistence, owner expiry recovery, late-create cleanup, and closing all sessions. Terminal output remains in memory and bypasses chat/workflow persistence and redaction.
+
+Browser E2E runs commands in the opened folder through a real PTY, checks output and workspace width, interrupts a foreground process with Ctrl+C, switches between two terminal tabs, hides/reopens the panel using Ctrl+backquote, and stops both sessions with trash. It captures `docs/screenshots/terminal.png` and uses no provider requests. Real PTY integration tests also cover foreground/background process cleanup, output retention, resize, normal lease expiry, and preserving jobs across machine sleep.
+
+Native staging loads the staged `node-pty` module with the bundled Node executable and opens, resizes, and closes a shell; packaging fails if that check fails. Manually verify the packaged macOS app's Terminal tab and Ctrl+backquote shortcut, input focus, Ctrl+C, and window-close cleanup. Windows/Linux PTY packaging and native interaction remain unverified.

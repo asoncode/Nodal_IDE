@@ -9,12 +9,29 @@ import { templates } from '../../core/src/templates.js';
 import { Store, digest, redact, type StoredRun } from '../../persistence/src/index.js';
 import * as workspace from '../../workspace/src/index.js';
 import { checkAvailability, runProvider } from '../../providers/src/index.js';
+import { ChatRuntime } from './chat.js';
+import { TerminalRuntime } from './terminals.js';
+import type { CreateTerminalInput, TerminalOwner, TerminalScope } from '../../shared/src/terminal.js';
+import { CHAT_ATTACHMENT_LIMITS, isChatTextFilename, type ChatAttachmentInput, type CreateChatInput } from '../../shared/src/chat.js';
 
 const id = z.string().min(1).max(200);
 const projectParams = z.object({ projectId: id }).strict();
 const runParams = z.object({ runId: id }).strict();
+const chatParams = projectParams.extend({ chatId: id });
+const terminalOwner = projectParams.extend({ ownerId: id });
+const terminalParams = terminalOwner.extend({ terminalId: id });
+const terminalSize = { cols: z.number().int().min(2).max(500), rows: z.number().int().min(1).max(300) };
+const chatAttachment = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('reference'), path: z.string().min(1).max(4096) }).strict(),
+  z.object({ kind: z.literal('upload'), name: z.string().min(1).max(255), content: z.string().max(CHAT_ATTACHMENT_LIMITS.fileBytes) }).strict(),
+]);
 const requestSchemas = {
   bootstrap: z.object({}).strict(), providerStatus: z.object({}).strict(),
+  createTerminal: terminalOwner.extend(terminalSize),
+  readTerminal: terminalParams.extend({ after: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) }),
+  writeTerminal: terminalParams.extend({ data: z.string().max(64 * 1024) }),
+  resizeTerminal: terminalParams.extend(terminalSize),
+  closeTerminal: terminalParams, closeTerminals: terminalOwner,
   openProject: z.object({ path: z.string().min(1).max(4096) }).strict(),
   files: projectParams,
   readFile: projectParams.extend({ path: z.string().min(1).max(4096) }),
@@ -29,6 +46,14 @@ const requestSchemas = {
   diff: projectParams.extend({ runId: id.optional() }),
   generateGraph: projectParams.extend({ graph: GraphSchema, prompt: z.string().min(1).max(20000), provider: z.enum(['codex','claude']) }),
   applyChanges: runParams.extend({ nodeId: id, expectedHead: id, expectedSourceHead: id, approved: z.literal(true) }),
+  createChat: projectParams.extend({ provider: z.enum(['claude', 'codex']), model: z.string().trim().min(1).max(200).optional(), permission: z.enum(['read-only', 'scoped-edit']).default('read-only'), context: z.object({ graph: GraphSchema, nodeId: id, runId: id.optional() }).strict().optional() }),
+  chats: projectParams, inspectChat: chatParams,
+  chatFiles: projectParams,
+  sendChat: chatParams.extend({ message: z.string().trim().min(1).max(20000), attachments: z.array(chatAttachment).max(CHAT_ATTACHMENT_LIMITS.count).default([]), confirmed: z.literal(true) }),
+  cancelChat: chatParams.extend({ turnId: id }),
+  approveChatCommand: chatParams.extend({ turnId: id, approvalId: id, approved: z.boolean() }),
+  chatDiff: chatParams,
+  applyChatChanges: chatParams.extend({ expectedHead: id, expectedSourceHead: id, approved: z.literal(true) }),
 };
 type PendingApproval = { request: ApprovalRequest; resolve: (approved: boolean) => void };
 type WorkspaceResult = { worktree: workspace.AttemptWorktree; head: string };
@@ -39,7 +64,9 @@ export class NodalService {
   private executions = new Map<string, Set<Promise<NodeResult>>>();
   private pending = new Map<string, PendingApproval>();
   private generation = new Set<AbortController>();
-  constructor(readonly store: Store, readonly dataDir: string) { store.recover(); }
+  private chat: ChatRuntime;
+  private terminals: TerminalRuntime;
+  constructor(readonly store: Store, readonly dataDir: string) { store.recover(); this.chat = new ChatRuntime(store, dataDir); this.terminals = new TerminalRuntime(projectId => store.project(projectId).root); }
   private record(runId: string, kind: string, payload: unknown, nodeId?: string, attemptId?: string) {
     return this.store.appendEvent({ eventId: randomUUID(), runId, kind, payload, nodeId, attemptId, sequence: 1, timestamp: new Date().toISOString() });
   }
@@ -55,6 +82,21 @@ export class NodalService {
     const projectId = params.projectId as string;
     const runId = params.runId as string;
     switch (method) {
+      case 'createTerminal': return this.terminals.create(params as unknown as CreateTerminalInput);
+      case 'readTerminal': return this.terminals.read(params as unknown as TerminalScope & { after: number });
+      case 'writeTerminal': return this.terminals.write(params as unknown as TerminalScope & { data: string });
+      case 'resizeTerminal': return this.terminals.resize(params as unknown as TerminalScope & { cols: number; rows: number });
+      case 'closeTerminal': return this.terminals.closeTerminal(params as unknown as TerminalScope);
+      case 'closeTerminals': return this.terminals.closeTerminals(params as unknown as TerminalOwner);
+      case 'createChat': return this.chat.create(params as unknown as CreateChatInput);
+      case 'chats': return this.chat.list(projectId);
+      case 'inspectChat': return this.chat.inspect(projectId, params.chatId as string);
+      case 'chatFiles': return (await workspace.listFiles(this.store.project(projectId).root)).filter(file => !workspace.isSensitivePath(file.path) && isChatTextFilename(file.path) && file.size <= CHAT_ATTACHMENT_LIMITS.fileBytes);
+      case 'sendChat': return this.chat.send(projectId, params.chatId as string, params.message as string, params.attachments as ChatAttachmentInput[]);
+      case 'cancelChat': return this.chat.cancel(projectId, params.chatId as string, params.turnId as string);
+      case 'approveChatCommand': return this.chat.approveCommand(projectId, params.chatId as string, params.turnId as string, params.approvalId as string, params.approved as boolean);
+      case 'chatDiff': return this.chat.diff(projectId, params.chatId as string);
+      case 'applyChatChanges': return this.chat.apply(projectId, params.chatId as string, params.expectedHead as string, params.expectedSourceHead as string);
       case 'bootstrap': return { projects: this.store.projects(), templates, providers: await this.providerStatus() };
       case 'providerStatus': return this.providerStatus();
       case 'openProject': {
@@ -257,5 +299,5 @@ export class NodalService {
       throw new Error('Provider returned an invalid graph after two attempts. Your draft was not changed.');
     } finally { this.generation.delete(controller); }
   }
-  async close() { for (const c of this.generation) c.abort(); for (const e of this.engines.values()) e.cancel(); await Promise.allSettled(this.tasks.values()); }
+  async close() { for (const c of this.generation) c.abort(); for (const e of this.engines.values()) e.cancel(); await Promise.allSettled([...this.tasks.values(), this.chat.close(), this.terminals.close()]); }
 }

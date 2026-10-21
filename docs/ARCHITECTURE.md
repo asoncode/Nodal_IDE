@@ -93,13 +93,29 @@ tests use temporary repositories and real processes. SDK availability and
 authentication are reported separately from live execution. A successful
 automated fixture is not evidence that a live provider account is authorized.
 
+## Integrated terminals
+
+The renderer uses xterm.js; the sidecar owns real host PTYs through `node-pty`.
+Authenticated API calls create, write, resize, read, and close sessions. Every
+request checks the project and window-owner IDs. Shells start in the open folder
+and use normal host user permissions, independently of workflow approvals.
+
+Output is raw ANSI in a 512 KiB UTF-8 memory buffer per session, read through
+absolute string cursors. It bypasses SQLite, event logs, and redaction. Hidden
+tabs keep polling and preserve their terminal instances. Closing a folder/window
+closes its owner; late creation is blocked by an owner tombstone. A two-minute
+lease cleans up abandoned renderers, with a fresh lease after machine sleep.
+Runtime shutdown also stops terminals. POSIX cleanup captures shell descendants
+and their job-control process groups; deliberately detached daemons are outside
+that guarantee.
+
 ## Concrete stack choices
 
 Node 24's built-in `node:sqlite` replaces an additional SQLite native binding.
 Transactions and typed repositories provide the query boundary; migrations use
 `BEGIN IMMEDIATE` and WAL. Graph and attempt payloads live as versioned JSON,
-with indexed relational run/event/approval keys. This keeps the first release
-portable without a second native addon build.
+with indexed relational run/event/approval keys. This avoids an additional
+database native binding.
 
 The renderer uses plain scoped CSS and semantic controls instead of Tailwind and
 a component framework. React Flow and Monaco provide the complex interactions;
@@ -112,8 +128,9 @@ receives the token in a launch URL fragment, immediately removes it from the
 address, and retains it only in memory. Local clients without an Origin header
 still need the token. Host and browser Origin are validated on every request.
 
-Release packaging stages the exact installed provider SDK versions and the Node
-executable. This is larger than a standalone compiled sidecar but preserves the
+Release packaging stages the exact installed provider SDK and `node-pty` versions
+and the Node executable. A real PTY smoke test runs with that staged executable
+before packaging. This is larger than a standalone compiled sidecar but preserves the
 official SDKs' native executable resolution without extracting credential files
 or making unsupported binary-bundling assumptions. Build each target on its
 corresponding OS and architecture.

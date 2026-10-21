@@ -42,7 +42,7 @@ beforeEach(() => {
       run: { id: 'run-1', projectId: project.id, graph, status: 'running', createdAt: new Date().toISOString() },
       inspectRun: { run: { id: 'run-1', projectId: project.id, graph, status: 'running', createdAt: new Date().toISOString() }, attempts: [], checkpoints: [], approvals: [{ id: 'approval-1', nodeId: 'command-1', decision: 'pending', message: 'Run node --version with your user privileges?', scope: { command: 'node', args: ['--version'] } }] },
       events: [{ eventId: 'event-1', sequence: 1, runId: 'run-1', nodeId: 'command-1', timestamp: new Date().toISOString(), kind: 'command.output', payload: { text: 'v24.0.0' } }],
-      approve: { accepted: true },
+      approve: { accepted: true }, chats: [], closeTerminals: { closed: true },
     };
     if (!(method in results)) throw new Error(`Unexpected API call: ${method}`);
     return results[method] as T;
@@ -175,4 +175,39 @@ describe('workspace flows', () => {
     fireEvent.change(editor, { target: { value: 'unsaved code' } }); expect(handlers.canClose()).toBe(false); expect(confirm).toHaveBeenCalledOnce();
   });
 
+});
+
+
+describe('chat integration', () => {
+  it('opens the sidebar from a workflow agent and restores the inspector on close', async () => {
+    const agent = createNode('agent', 1); agent.id = 'orchestrator'; agent.label = 'Orchestrator';
+    if (agent.kind === 'agent') { agent.config.provider = 'codex'; agent.config.model = 'configured-model'; }
+    graph.nodes.push(agent);
+    await ready(); fireEvent.click(screen.getByRole('button', { name: 'Orchestrator' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Chat with this agent' }));
+    expect(screen.getByLabelText('Chat context')).toHaveProperty('value', agent.id);
+    expect(screen.getByLabelText('Chat provider')).toHaveProperty('value', 'codex');
+    expect(screen.getByLabelText('Chat model')).toHaveProperty('value', 'configured-model');
+    fireEvent.click(screen.getByRole('button', { name: 'Close chat' }));
+    expect(screen.getByLabelText('Instructions')).toHaveProperty('value', agent.kind === 'agent' ? agent.config.instructions : '');
+    expect(calls.some(call => call.method === 'createChat' || call.method === 'sendChat')).toBe(false);
+  });
+});
+
+
+describe('terminal integration', () => {
+  it('opens the terminal panel and leaves shell keyboard controls intact', async () => {
+    await ready(); fireEvent.click(screen.getByRole('button', { name: 'Terminal' }));
+    expect(screen.getByText('Run commands in your project folder using your local shell.')).toBeTruthy();
+    expect(calls.some(call => call.method === 'createTerminal')).toBe(false);
+    const terminal = document.createElement('div'); terminal.className = 'xterm'; const input = document.createElement('textarea'); terminal.append(input); document.body.append(terminal);
+    try {
+      fireEvent.keyDown(input, { key: 'b', ctrlKey: true });
+      expect(screen.getByRole('button', { name: 'Toggle sidebar' }).getAttribute('aria-pressed')).toBe('true');
+      fireEvent.keyDown(input, { key: '`', code: 'Backquote', ctrlKey: true });
+      expect(screen.getByRole('button', { name: 'Toggle panel' }).getAttribute('aria-pressed')).toBe('false');
+      fireEvent.keyDown(input, { key: '`', code: 'Backquote', ctrlKey: true });
+      expect(screen.getByRole('button', { name: 'Toggle panel' }).getAttribute('aria-pressed')).toBe('true');
+    } finally { terminal.remove(); }
+  });
 });

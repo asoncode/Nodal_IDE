@@ -86,7 +86,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .run-button { height: 24px; padding: 0 10px 0 8px; margin-left: 4px; border-radius: 4px; background: var(--accent); color: #fff; font-size: 12px; }
 .run-button:hover:not(:disabled) { background: var(--accent-hover); }
 
-.workbench { display: flex; min-height: 0; }
+.workbench { display: flex; min-height: 0; min-width: 0; }
 .activity-bar { width: 48px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--bg-side); border-right: 1px solid var(--border); }
 .activity-bar button { position: relative; width: 48px; height: 48px; justify-content: center; color: #868686; }
 .activity-bar button:hover { color: var(--fg-strong); }

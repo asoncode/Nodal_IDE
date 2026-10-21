@@ -21,6 +21,8 @@ export type AgentRunInput = {
   model?: string; resumeId?: string; timeoutMs?: number; maxTurns?: number; maxBudgetUsd?: number;
   outputSchema?: Record<string, unknown>;
   allowedTools?: string[]; noTools?: boolean;
+  allowNonGit?: boolean;
+  approveCommand?: (command: string, signal: AbortSignal) => Promise<boolean>;
   signal?: AbortSignal; onEvent?: (event: AgentEvent) => void | Promise<void>;
 };
 export type AgentResult = { sessionId?: string; output: string; usage?: Record<string, unknown>; costUsd: number | null };
@@ -151,13 +153,14 @@ export async function codexConfiguration(cwd: string, signal?: AbortSignal): Pro
 
 export function claudeOptions(input: AgentRunInput, controller: AbortController): Options {
   const writable = input.permissionMode === 'workspace-write';
-  const supported = writable ? ['Read', 'Edit', 'Write'] : ['Read'];
+  const commands = writable && !!input.approveCommand;
+  const supported = writable ? ['Read', 'Edit', 'Write', ...(commands ? ['Bash'] : [])] : ['Read'];
   if (input.allowedTools?.some(tool => !supported.includes(tool))) throw new Error('Claude supports only Read, plus Edit/Write with scoped-edit permission.');
   const tools = input.noTools ? [] : input.allowedTools?.length ? [...input.allowedTools] : supported;
   return {
     cwd: input.cwd, model: input.model || undefined, resume: input.resumeId,
     abortController: controller, permissionMode: 'default', settingSources: [],
-    tools, allowedTools: [], disallowedTools: ['Bash', 'Agent', 'Task', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Skill'],
+    tools, allowedTools: [], disallowedTools: [...(commands ? [] : ['Bash']), 'Agent', 'Task', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Skill'],
     mcpServers: {}, strictMcpConfig: true, plugins: [],
     maxTurns: input.maxTurns ?? 12, maxBudgetUsd: input.maxBudgetUsd,
     outputFormat: input.outputSchema ? { type: 'json_schema', schema: input.outputSchema } : undefined,
@@ -168,6 +171,10 @@ export function claudeOptions(input: AgentRunInput, controller: AbortController)
       try {
         if (!tools.includes(event.tool_name)) throw new Error('Tool not authorized.');
         const args = event.tool_input as Record<string, unknown>;
+        if (event.tool_name === 'Bash') {
+          if (typeof args.command !== 'string' || args.run_in_background || !input.approveCommand || controller.signal.aborted || !await input.approveCommand(args.command, controller.signal) || controller.signal.aborted) throw new Error('Command was not approved.');
+          return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
+        }
         await validateToolPath(input.cwd, args.file_path ?? args.path, event.tool_name === 'Write');
         return {};
       } catch (error) {
@@ -201,6 +208,7 @@ export async function runProvider(input: AgentRunInput): Promise<AgentResult> {
       const codex = new Codex({ configOverrides });
       const options = {
         workingDirectory: input.cwd, sandboxMode: input.permissionMode ?? 'read-only',
+        skipGitRepoCheck: input.allowNonGit ?? false,
         approvalPolicy: 'never' as const, networkAccessEnabled: false, webSearchMode: 'disabled' as const,
         model: input.model || undefined, additionalDirectories: [],
       };

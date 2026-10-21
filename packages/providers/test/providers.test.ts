@@ -123,4 +123,21 @@ describe('provider policy and event adapters (SDK mocks, no network)', () => {
       await expect(validateToolPath(root, '.git/config', true)).rejects.toThrow('Git metadata');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+  it('keeps shell tools disabled except in an explicitly approved editing chat', async () => {
+    const approve = vi.fn(async () => false); const controller = new AbortController();
+    const readOnly = claudeOptions({ provider: 'claude', prompt: 'read', cwd: tmpdir(), approveCommand: approve }, controller);
+    expect(readOnly.tools).toEqual(['Read']); expect(readOnly.disallowedTools).toContain('Bash');
+    const editing = claudeOptions({ provider: 'claude', prompt: 'edit', cwd: tmpdir(), permissionMode: 'workspace-write', approveCommand: approve }, controller);
+    expect(editing.tools).toContain('Bash'); expect(editing.disallowedTools).not.toContain('Bash');
+    const hook = editing.hooks!.PreToolUse![0].hooks[0] as any;
+    const request = { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'node --version' } };
+    expect(await hook(request)).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(approve).toHaveBeenCalledWith('node --version', controller.signal);
+    approve.mockResolvedValue(true);
+    expect(await hook(request)).toMatchObject({ hookSpecificOutput: { permissionDecision: 'allow' } });
+    controller.abort();
+    expect(await hook(request)).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(approve).toHaveBeenCalledTimes(2);
+  });
+
 });

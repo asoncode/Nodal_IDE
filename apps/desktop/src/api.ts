@@ -18,10 +18,10 @@ export async function connect() {
   return connection;
 }
 
-export async function api<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+export async function api<T = unknown>(method: string, params: Record<string, unknown> = {}, options: { keepalive?: boolean } = {}): Promise<T> {
   const { url, token } = await connect();
   const response = await fetch(`${url.replace(/\/$/, '')}/api`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ method, params }),
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ method, params }), keepalive: options.keepalive,
   });
   const body = await response.json();
   if (!response.ok || body.error) throw new Error(typeof body.error === 'string' ? body.error : body.error?.message || `Request failed (${response.status})`);

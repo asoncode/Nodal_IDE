@@ -3,6 +3,7 @@ import { access, mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promise
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
+import type { ChatSession } from '../packages/shared/src/chat.js';
 import { preview } from 'vite';
 import { Store } from '../packages/persistence/src/index.js';
 import { NodalService } from '../packages/runtime/src/service.js';
@@ -26,7 +27,8 @@ async function eventually(check:()=>Promise<boolean>, message:string, timeout=20
   while(Date.now()<deadline) { if(await check()) return; await new Promise(r=>setTimeout(r,120)); }
   throw new Error(message);
 }
-const temp=await mkdtemp(join(tmpdir(),'nodal-ui-'));
+// gstack permits uploads from /tmp and the workspace; macOS Node defaults to /var/folders.
+const temp=await mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(),'nodal-ui-'));
 const repo=join(temp,'project'), data=join(temp,'data'); await mkdir(repo);
 await writeFile(join(repo,'index.js'),'export const answer = 42;\n');
 for(const args of [['init','-b','main'],['add','--','.'],['-c','user.name=Nodal Test','-c','user.email=test@localhost','commit','-m','Initial']]) {
@@ -38,9 +40,10 @@ const runtime=await startServer(service,{origins:['http://127.0.0.1:5174']});
 const vite=await preview({configFile:'apps/desktop/vite.config.ts',preview:{host:'127.0.0.1',port:5174,strictPort:true}});
 try {
   await browse('viewport','1500x960');
-  await browse('console','--clear');
   await browse('goto',`http://127.0.0.1:5174/?test=${Date.now()}#token=${runtime.token}&port=${new URL(runtime.url).port}`);
   await eventually(async()=> (await browse('text')).includes('Local runtime connected'),'Runtime bootstrap failed',40000);
+  // The shared browser may retain a previous preview whose runtime has already stopped.
+  await browse('console','--clear');
   await browse('click','.view-title button[aria-label="Open Folder"]');
   await browse('wait','[role="dialog"]');
   await browse('fill','input[placeholder="/Users/you/projects/my-app"]',repo);
@@ -112,6 +115,68 @@ try {
   const saved=store.graphs(project.id)[0]; assert.equal(saved.nodes.length,4); assert.equal(saved.edges.length,3);
   await mkdir('docs/screenshots',{recursive:true});
   await browse('screenshot',resolve('docs/screenshots/nodal.png'));
+  // Explicitly seeded history exercises the real chat API and renderer without a paid model request.
+  const chat = await service.dispatch('createChat', { projectId: project.id, provider: 'claude', permission: 'read-only' }) as ChatSession;
+  store.saveChatTurn({ id: 'browser-chat-fixture', chatId: chat.id, message: 'Fixture: explain this repository', output: 'Fixture response: this repository exports an answer.', status: 'succeeded', createdAt: new Date().toISOString() });
+  await browse('click', 'button[aria-label="Agent chat"]');
+  await browse('wait', 'select[aria-label="Chat history"]');
+  await eventually(async () => (await browse('text')).includes('New Claude chat'), 'Chat history did not load');
+  await browse('select', 'select[aria-label="Chat history"]', chat.id);
+  await eventually(async () => (await browse('text')).includes('Fixture response: this repository exports an answer.'), 'Saved chat response did not load');
+  await browse('click', 'button[aria-label="New chat"]');
+  await browse('select', 'select[aria-label="Chat provider"]', 'codex');
+  await browse('select', 'select[aria-label="Chat access"]', 'scoped-edit');
+  await browse('fill', 'textarea[aria-label="Message agent"]', 'Draft only: review this project');
+  await eventually(async () => (await browse('js', 'document.querySelector(".chat-compose-actions .primary")?.disabled')).trim() === 'false', 'Chat composer stayed disabled');
+  await browse('type', ' @index');
+  await browse('wait', '[role="option"]:has-text("index.js")');
+  await browse('press', 'Enter');
+  await browse('wait', 'button[aria-label="Remove index.js"]');
+  const upload = join(temp, 'brief.md'); await writeFile(upload, '# Brief\nKeep changes scoped.');
+  await browse('upload', 'input[aria-label="Upload chat files"]', upload);
+  await browse('wait', 'button[aria-label="Remove brief.md"]');
+  await browse('click', 'button[aria-label="Remove brief.md"]');
+  await browse('upload', 'input[aria-label="Upload chat files"]', upload);
+  await browse('wait', 'button[aria-label="Remove brief.md"]');
+  assert.equal(store.chats(project.id).length, 1, 'Draft unexpectedly created a provider session');
+  await browse('screenshot', resolve('docs/screenshots/chat.png'));
+  await browse('viewport', '1000x650');
+  assert.equal((await browse('js', 'document.documentElement.scrollWidth <= window.innerWidth')).trim(), 'true', 'Chat overflows the minimum window width');
+  assert.equal((await browse('js', 'document.querySelector(".chat-compose-actions .primary").getBoundingClientRect().bottom <= window.innerHeight - 22')).trim(), 'true', 'Chat send button is hidden at the minimum window height');
+  await browse('viewport', '1500x960');
+  console.log('PASS saved chat history, provider/access controls, @ references, uploads/removal, draft consent, minimum window size (seeded fixture, no model request)');
+  await browse('click', 'button[aria-label="Close chat"]');
+  await browse('click', '.panel-tabs button:has-text("Terminal")');
+  await browse('click', '.terminal-actions button[aria-label="New terminal"]');
+  await browse('wait', '.xterm-screen');
+  await browse('click', '.terminal-view .xterm-screen');
+  // Build the marker at runtime so echoed input cannot satisfy the output assertion.
+  await browse('type', `unset HISTFILE; pwd; node -p "['NODAL','TERMINAL','OK'].join('_')"`);
+  await browse('press', 'Enter');
+  await eventually(async () => (await browse('text')).includes('NODAL_TERMINAL_OK'), 'Real shell output was not rendered');
+  assert.equal((await browse('js', 'document.documentElement.scrollWidth <= window.innerWidth')).trim(), 'true', 'Terminal expands the workspace beyond the window');
+  assert((await browse('text')).includes(project.root), 'Terminal did not start in the open repository');
+  await browse('type', `node -e "setInterval(()=>{},1000)"`);
+  await browse('press', 'Enter');
+  await browse('press', 'Control+C');
+  await browse('type', `node -p "['INTERRUPT','OK'].join('_')"`);
+  await browse('press', 'Enter');
+  await eventually(async () => (await browse('text')).includes('INTERRUPT_OK'), 'Ctrl+C did not return control to the shell');
+  const firstTab = (await browse('js', 'document.querySelector(".terminal-tabs [role=tab]").id')).trim();
+  await browse('click', '.terminal-actions button[aria-label="New terminal"]');
+  await eventually(async () => (await browse('js', 'document.querySelectorAll(".terminal-tabs [role=tab]").length')).trim() === '2', 'Second terminal tab did not open');
+  await browse('click', `#${firstTab}`);
+  await browse('press', 'Control+Backquote');
+  assert.equal((await browse('is', 'visible', '.terminal-panel')).trim(), 'false', 'Terminal shortcut did not hide the panel');
+  await browse('press', 'Control+Backquote');
+  assert.equal((await browse('is', 'visible', '.terminal-panel')).trim(), 'true', 'Terminal shortcut did not reopen the panel');
+  assert.equal((await browse('js', 'document.querySelectorAll(".terminal-tabs [role=tab]").length')).trim(), '2', 'Hiding the panel discarded terminal tabs');
+  await browse('screenshot', resolve('docs/screenshots/terminal.png'));
+  await browse('click', '.terminal-actions button[aria-label="Kill terminal"]');
+  await eventually(async () => (await browse('js', 'document.querySelectorAll(".terminal-tabs [role=tab]").length')).trim() === '1', 'First terminal did not close');
+  await browse('click', '.terminal-actions button[aria-label="Kill terminal"]');
+  await eventually(async () => (await browse('js', 'document.querySelectorAll(".terminal-tabs [role=tab]").length')).trim() === '0', 'Last terminal did not close');
+  console.log('PASS real terminal cwd/output, Ctrl+C, multiple tabs, shortcut hide/reopen, and terminal cleanup');
   const errors=await browse('console','--errors');
   assert(errors.includes('no console errors'),errors);
   console.log('PASS offline replay, graph round-trip, no browser errors; screenshot docs/screenshots/nodal.png');

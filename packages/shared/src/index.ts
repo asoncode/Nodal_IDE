@@ -208,3 +208,5 @@ export function createNode(kind: NodeKind, id: string, position = { x: 0, y: 0 }
   };
   return NodeSchema.parse({ id, kind, label: labels[kind], position });
 }
+
+export type { ChatProvider, ChatPermission, ChatContext, ChatSession, ChatTurn, ChatEvent, ChatSnapshot, CreateChatInput, ChatDiff } from './chat.js';

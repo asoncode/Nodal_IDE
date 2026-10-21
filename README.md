@@ -9,7 +9,9 @@ It's an early, working version. The core editing and workflow features are in pl
 ## What you can do
 
 - **Open and edit local folders.** Browse files in Explorer, edit them with Monaco, and save changes to disk. The desktop app includes a native folder picker and separate workspace windows.
+- **Use an integrated terminal.** Run your local shell in the open folder, with separate terminal tabs and interactive command output.
 - **Build workflows visually.** Add agents, commands, conditions, parallel branches, test checks, bounded retry loops, and human approvals. Start with a template or build your own graph.
+- **Chat with Claude or Codex.** Open the chat sidebar for a repository conversation, or start a separate chat using a workflow agent’s context.
 - **Run Claude and Codex.** Give each agent its instructions and permissions, then review the request before it starts.
 - **Review code before applying it.** Coding attempts run in separate Git worktrees. Inspect their diffs and explicitly approve changes before bringing them into your checkout.
 - **Keep track of what happened.** View streamed output, approvals, attempts, and saved run history. Replay a past run without executing it again.
@@ -50,6 +52,12 @@ In the desktop app, choose **File → Open Folder…**, then select a folder. Cl
 Each new window starts with an empty workspace and has its own folder and editor tabs. Nodal asks before discarding unsaved file or workflow edits when you switch folders or close a window. In browser mode, the Explorer folder button lets you enter a full local path.
 
 File saves check whether the file has changed on disk since you opened it. If another editor changes it, Nodal lets you compare the versions rather than silently overwriting the changes.
+
+## Use the terminal
+
+Open the bottom panel's **Terminal** tab or press <kbd>Ctrl + `</kbd>. Click **New terminal** or **+** to start your local login shell in the project folder. Each **+** opens another terminal tab. Type commands normally and use **Ctrl+C** to interrupt a foreground command. **Clear terminal** clears the visible terminal history; the **trash** button stops and closes the selected session. Drag the bottom panel sash to resize it; terminal rows and columns follow the available space.
+
+Hiding the panel or switching tabs keeps shells running. Switching or closing the folder, or closing its window, stops that window's terminal sessions. These are ordinary host shells with your user permissions and filesystem/network access. Terminal output is raw, unredacted, and held only in memory; it is not saved with workflow or chat history and is not restored after restart.
 
 ## Try a workflow without an AI account
 
@@ -92,6 +100,20 @@ You only need to sign in to the providers you plan to use. Nodal doesn't collect
 
 The **Feature Builder**, **Parallel Fullstack**, and **Bug Hunt** templates include agent nodes. Set their instructions, choose a model if needed, and review their permissions before running. The **Generate** feature can also use Claude to propose a workflow; you review the preview before applying it.
 
+## Chat with an agent
+
+Click the **Agent chat** speech-bubble icon in the activity bar or top toolbar. Choose Claude or Codex, an optional model, and an access level, then type your message and click **Send & approve**. Each send approves one provider turn using the access shown in the sidebar. Nodal uses your existing official CLI login.
+
+**Read only** chats can inspect the open folder. **Isolated edits** chats work in a separate Git worktree based on committed files; unsaved buffers and uncommitted main-checkout edits aren't copied there. Claude asks for approval before each shell command. Codex may run sandboxed commands as part of the approved turn, with network access disabled. Claude's approved shell commands run with your host user privileges and aren't an OS sandbox.
+
+To discuss a workflow agent, select its node and click **Chat with this agent**, or choose it in the chat's **Context** menu. The conversation uses a snapshot of that node's instructions and model, plus recorded run facts when attached. It is a separate conversation and does not take over or alter the running agent.
+
+Type **@** in the message box to search saved files in the open folder. Use the arrow keys and Enter, or click a result, to attach a file. The **@** button opens the same picker. Use the **paperclip** to upload code or text files from anywhere on your computer. You can remove attachments before sending and expand them in the conversation afterward.
+
+Attachments support UTF-8 text and code: up to 8 files, 64 KiB each, and 256 KiB total per message. References capture saved file contents when you send; unsaved editor changes aren't included. Uploads are context only and aren't copied into your repository or chat worktree. Images, PDFs, and other binary documents aren't supported yet.
+
+Conversations and their activity are saved locally. Select one from **Conversation** to continue it, or use **New chat** to start another. **Stop** cancels active work and preserves partial edits. In editing chats, use **Review changes** and then **Apply reviewed changes** to bring reviewed code into a clean main checkout. Changes are never applied automatically.
+
 ## How runs affect your code
 
 A workflow runs from a committed snapshot of your repository. Coding attempts use isolated Git worktrees, so unsaved editor buffers and uncommitted changes in your main checkout aren't part of the run.
@@ -114,7 +136,7 @@ On macOS, the app is written to:
 apps/desktop/src-tauri/target/release/bundle/macos/Nodal.app
 ```
 
-You can open this app directly. It bundles Node and the provider SDK dependencies, so the verified Apple Silicon build is about 745 MiB. It's currently an unsigned local build. There are no published installers or automatic updates, and Windows/Linux builds haven't been verified. Native menu and folder-picker interaction still needs manual testing; the shared renderer has automated browser coverage.
+You can open this app directly. It bundles Node, the provider SDK dependencies, and the native terminal module, so the verified Apple Silicon build is about 807 MiB. It's currently an unsigned local build. There are no published installers or automatic updates, and Windows/Linux builds haven't been verified. Native menu and folder-picker interaction still needs manual testing; the shared renderer has automated browser coverage.
 
 For development launch issues, see the [Operator guide](docs/OPERATOR_GUIDE.md). Release builds use their bundled Node executable.
 

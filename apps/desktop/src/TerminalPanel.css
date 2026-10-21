@@ -1,0 +1,21 @@
+.terminal-panel { flex: 1; min-height: 0; min-width: 0; overflow: hidden; flex-direction: column; background: var(--bg-side); }
+.terminal-toolbar { display: flex; height: 30px; flex-shrink: 0; border-bottom: 1px solid var(--border); padding: 0 8px 0 12px; gap: 8px; }
+.terminal-tabs { display: flex; min-width: 0; overflow-x: auto; flex: 1; }
+.terminal-tabs > button { gap: 6px; padding: 0 10px; min-width: 0; border-bottom: 1px solid transparent; color: var(--fg-muted); font-size: 12px; }
+.terminal-tabs > button:hover { background: var(--bg-hover); }
+.terminal-tabs > button[aria-selected=true] { color: var(--fg-strong); border-bottom-color: var(--accent); }
+.terminal-tabs > button > span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-tabs small { color: var(--fg-dim); font-size: 10px; }
+.terminal-tabs small.running { color: var(--running); }
+.terminal-actions { display: flex; align-items: center; flex-shrink: 0; gap: 2px; }
+.terminal-views { flex: 1; min-height: 0; overflow: hidden; }
+.terminal-view { height: 100%; padding: 6px 12px 2px; overflow: hidden; }
+.terminal-view .xterm { height: 100%; }
+.terminal-view .xterm-viewport { overscroll-behavior: contain; }
+.terminal-error { flex-shrink: 0; padding: 4px 20px; color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
+.terminal-empty { padding: 15px 20px 8px; display: grid; gap: 7px; color: var(--fg-muted); }
+.terminal-empty > div { display: flex; gap: 8px; align-items: center; }
+.terminal-empty strong { font-size: 12px; color: var(--fg); }
+.terminal-empty button { margin-left: 8px; }
+.terminal-empty p { font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-empty small { color: var(--fg-dim); }

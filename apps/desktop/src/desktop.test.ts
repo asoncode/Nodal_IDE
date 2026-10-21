@@ -33,4 +33,24 @@ describe('native window bridge', () => {
     await expect(listenDesktopActions({ openFolder: vi.fn(), save: vi.fn(), canClose: () => true })).rejects.toThrow('window closed');
     expect(off).toHaveBeenCalledOnce();
   });
+  it('waits for terminal cleanup before destroying a window and reports cleanup failures', async () => {
+    let closing: (event: { preventDefault: () => void }) => Promise<void> = async () => {};
+    const destroy = vi.fn(async () => {}); let complete = () => {};
+    getCurrentWindow.mockReturnValue({ listen: vi.fn(async () => () => {}), onCloseRequested: vi.fn(async callback => { closing = callback; return () => {}; }), destroy });
+    const beforeClose = vi.fn(() => new Promise<void>(resolve => { complete = resolve; }));
+    const onError = vi.fn(); const canClose = vi.fn(() => true);
+    await listenDesktopActions({ openFolder() {}, save() {}, canClose, beforeClose, onError });
+    const event = { preventDefault: vi.fn() }; const request = closing(event);
+    expect(event.preventDefault).toHaveBeenCalledOnce(); expect(destroy).not.toHaveBeenCalled();
+    await closing(event); expect(beforeClose).toHaveBeenCalledOnce();
+    complete(); await request; expect(destroy).toHaveBeenCalledOnce(); expect(onError).not.toHaveBeenCalled();
+  });
+  it('keeps a window open if terminal shutdown fails', async () => {
+    let closing: (event: { preventDefault: () => void }) => Promise<void> = async () => {};
+    const destroy = vi.fn(); const onError = vi.fn();
+    getCurrentWindow.mockReturnValue({ listen: vi.fn(async () => () => {}), onCloseRequested: vi.fn(async callback => { closing = callback; return () => {}; }), destroy });
+    await listenDesktopActions({ openFolder() {}, save() {}, canClose: () => true, beforeClose: async () => { throw new Error('Runtime unavailable'); }, onError });
+    await closing({ preventDefault() {} }); expect(destroy).not.toHaveBeenCalled(); expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'Runtime unavailable' }));
+  });
+
 });

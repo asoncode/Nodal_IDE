@@ -5,11 +5,12 @@
   "type": "module",
   "exports": "./src/service.ts",
   "dependencies": {
-    "@nodal/shared": "workspace:*",
     "@nodal/core": "workspace:*",
-    "@nodal/workspace": "workspace:*",
-    "@nodal/providers": "workspace:*",
     "@nodal/persistence": "workspace:*",
+    "@nodal/providers": "workspace:*",
+    "@nodal/shared": "workspace:*",
+    "@nodal/workspace": "workspace:*",
+    "node-pty": "1.1.0",
     "zod": "^4.6.7"
   }
 }

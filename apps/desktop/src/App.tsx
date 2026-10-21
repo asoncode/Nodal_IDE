@@ -3,6 +3,9 @@ import { ReactFlow, Background, BackgroundVariant, Controls, MiniMap, Handle, Po
 import Editor, { DiffEditor } from '@monaco-editor/react';
 import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, CirclePlay, Bot, SquareTerminal, GitFork, Split, Merge, Repeat, UserCheck, GitMerge, Flag, CircleX, CircleCheck, type LucideIcon } from 'lucide-react';
 import { api } from './api.js';
+import ChatPanel from './ChatPanel.js';
+import TerminalPanel, { type TerminalPanelHandle } from './TerminalPanel.js';
+import { MessageSquare } from 'lucide-react';
 import { isDesktop, pickFolder, restoreLastProject, listenDesktopActions } from './desktop.js';
 import { createNode, emptyGraph, NODE_LABELS, language, type Graph, type GraphNode, type NodeKind, type Project, type Provider, type Run, type Event, type Inspection, type FileBuffer } from './model.js';
 import { GraphSchema } from '../../../packages/shared/src/index.js';
@@ -71,6 +74,8 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('graph');
   const [view, setView] = useState<View>('explorer');
   const [layout, setLayout] = useState({ sidebar: true, panel: true, inspector: true });
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatContextRequest, setChatContextRequest] = useState<{ nodeId: string; version: number }>();
   const [sizes, setSizes] = useState({ sidebar: 260, panel: 220, inspector: 300 });
   const [files, setFiles] = useState<string[]>([]);
   const [fileSearch, setFileSearch] = useState('');
@@ -86,7 +91,11 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState('Connecting to local runtime…');
   const [error, setError] = useState('');
-  const [dock, setDock] = useState<'events' | 'console' | 'approvals'>('events');
+  const [dock, setDock] = useState<'events' | 'console' | 'approvals' | 'terminal'>('events');
+  const terminalController = useRef<TerminalPanelHandle>(null);
+  const [terminalGeneration, setTerminalGeneration] = useState(0);
+  const terminalCount = useRef(0);
+  const terminalCountChanged = useCallback((count: number) => { terminalCount.current = count; }, []);
   const [modal, setModal] = useState<'project' | 'generate' | 'palette' | null>(null);
   const [projectPath, setProjectPath] = useState('');
   const [prompt, setPrompt] = useState('');
@@ -150,18 +159,23 @@ export default function App() {
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
   };
 
-  const loadProject = useCallback(async (selectedProject: Project, discardConfirmed = false) => {
+  const confirmFolderSwitch = useCallback(() => {
     const unsaved = buffersRef.current.some(buffer => buffer.content !== buffer.savedContent) || JSON.stringify(graphRef.current) !== graphBaseline.current;
-    if (!discardConfirmed && unsaved && !window.confirm('Discard unsaved edits and open another folder?')) return false;
+    if (terminalCount.current) return window.confirm(`Stop this window's ${terminalCount.current} terminal${terminalCount.current === 1 ? '' : 's'}${unsaved ? ', discard unsaved edits,' : ''} and open another folder?`);
+    return !unsaved || window.confirm('Discard unsaved edits and open another folder?');
+  }, []);
+  const loadProject = useCallback(async (selectedProject: Project, discardConfirmed = false) => {
+    if (!discardConfirmed && !confirmFolderSwitch()) return false;
     const [nextFiles, nextGraphs, nextRuns] = await Promise.all([api<string[]>('files', { projectId: selectedProject.id }), api<Graph[]>('listGraphs', { projectId: selectedProject.id }), api<Run[]>('runs', { projectId: selectedProject.id })]);
     const nextGraph = nextGraphs[0] ?? emptyGraph();
     graphRef.current = nextGraph; graphBaseline.current = JSON.stringify(nextGraph);
-    setProject(selectedProject); setBuffers([]); setActiveFile(undefined); setRunId(undefined); setInspection(undefined); setEvents([]); setDiff(undefined); setOpenFolders({});
+    setProject(selectedProject); setBuffers([]); setActiveFile(undefined); setRunId(undefined); setInspection(undefined); setEvents([]); setDiff(undefined); setOpenFolders({}); setChatContextRequest(undefined);
+    setTerminalGeneration(old => old + 1);
     setFiles(nextFiles); setGraphs(nextGraphs); setRuns(nextRuns); setGraph(nextGraph); setSavedGraph(nextGraphs.length ? JSON.stringify(nextGraph) : ''); setUndo([]); setRedo([]); setSelectedId(undefined); setSelectedIds([]); setSelectedEdge(undefined);
     setTab(selectedProject.isGitRepository === false ? 'code' : 'graph');
     setMessage(`Opened ${selectedProject.name}`);
     return true;
-  }, []);
+  }, [confirmFolderSwitch]);
 
   useEffect(() => {
     let disposed = false;
@@ -217,13 +231,12 @@ export default function App() {
   }, [project, tab, currentBuffer, graph]);
 
   const openFolderPath = useCallback(async (path: string) => {
-    const unsaved = buffersRef.current.some(buffer => buffer.content !== buffer.savedContent) || JSON.stringify(graphRef.current) !== graphBaseline.current;
-    if (unsaved && !window.confirm('Discard unsaved edits and open another folder?')) return;
+    if (!confirmFolderSwitch()) return;
     const next = await api<Project>('openProject', { path });
     if (!await loadProject(next, true)) return;
     setProjects(items => [...items.filter(item => item.id !== next.id), next]);
     setView('explorer'); setLayout(old => ({ ...old, sidebar: true })); setTab('code'); setModal(null);
-  }, [loadProject]);
+  }, [loadProject, confirmFolderSwitch]);
   const openFolder = useCallback(() => {
     explicitFolderChoice.current = true;
     if (!isDesktop()) { setModal('project'); return; }
@@ -243,8 +256,11 @@ export default function App() {
       save: () => { if (!disposed) desktopActions.current.save(); },
       canClose: () => {
         const unsaved = buffersRef.current.some(buffer => buffer.content !== buffer.savedContent) || JSON.stringify(graphRef.current) !== graphBaseline.current;
+        if (terminalCount.current) return window.confirm(`${unsaved ? 'Discard unsaved edits and close' : 'Close'} this window and stop its ${terminalCount.current} running terminal${terminalCount.current === 1 ? '' : 's'}?`);
         return !unsaved || window.confirm('Discard unsaved edits and close this window?');
       },
+      beforeClose: async () => { await terminalController.current?.closeAll(); },
+      onError: cause => { if (!disposed) setError(`Could not close this window: ${String(cause)}`); },
     }).then(unlisten => { if (disposed) unlisten(); else stop = unlisten; }).catch(cause => { if (!disposed) setError(`Desktop menu connection failed: ${String(cause)}`); });
     return () => { disposed = true; stop?.(); };
   }, []);
@@ -252,6 +268,8 @@ export default function App() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const element = event.target;
+      if (event.ctrlKey && (event.code === 'Backquote' || event.key === '`')) { event.preventDefault(); event.stopPropagation(); setLayout(old => ({ ...old, panel: !(old.panel && dock === 'terminal') })); setDock('terminal'); return; }
+      if (element instanceof HTMLElement && element.closest('.xterm')) return;
       const editing = element instanceof HTMLElement && (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) || element.closest('.monaco-editor'));
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { if (!isDesktop()) { event.preventDefault(); void act(save); } return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'o' && !isDesktop()) { event.preventDefault(); openFolder(); return; }
@@ -265,8 +283,8 @@ export default function App() {
       if ((event.metaKey || event.ctrlKey) && ['v', 'd'].includes(event.key.toLowerCase())) { event.preventDefault(); duplicate(); }
       if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); }
     };
-    window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
-  }, [save, act, tab, graph.nodes, selectedId, selectedIds, duplicate, deleteSelection, undoGraph, redoGraph, openFolder]);
+    window.addEventListener('keydown', handler, true); return () => window.removeEventListener('keydown', handler, true);
+  }, [save, act, tab, graph.nodes, selectedId, selectedIds, duplicate, deleteSelection, undoGraph, redoGraph, openFolder, dock]);
 
   const openFile = (path: string) => void act(async () => {
     if (!project) return;
@@ -321,7 +339,8 @@ export default function App() {
         <span className="divider"/>
         <IconButton title="Toggle sidebar" active={layout.sidebar} onClick={() => setLayout(old => ({ ...old, sidebar: !old.sidebar }))}><PanelLeft size={15}/></IconButton>
         <IconButton title="Toggle panel" active={layout.panel} onClick={() => setLayout(old => ({ ...old, panel: !old.panel }))}><PanelBottom size={15}/></IconButton>
-        <IconButton title="Toggle inspector" active={layout.inspector} onClick={() => setLayout(old => ({ ...old, inspector: !old.inspector }))}><PanelRight size={15}/></IconButton>
+        <IconButton title="Toggle inspector" active={layout.inspector && !chatOpen} onClick={() => { setChatOpen(false); setLayout(old => ({ ...old, inspector: !old.inspector || chatOpen })); }}><PanelRight size={15}/></IconButton>
+        <IconButton title="Toggle agent chat" active={chatOpen} onClick={() => setChatOpen(old => !old)}><MessageSquare size={15}/></IconButton>
       </div>
     </header>
 
@@ -329,6 +348,7 @@ export default function App() {
       <nav className="activity-bar" aria-label="Views">
         {([{ id: 'explorer', label: 'Explorer', icon: Files }, { id: 'workflows', label: 'Workflows', icon: Workflow }, { id: 'runs', label: 'Runs', icon: History }, { id: 'providers', label: 'Providers', icon: Plug }] as const).map(item => <button key={item.id} className={layout.sidebar && view === item.id ? 'active' : ''} title={item.label} aria-label={item.label} onClick={() => showView(item.id)}><item.icon size={22} strokeWidth={1.5}/></button>)}
         <button className={tab === 'diff' ? 'active' : ''} title="Source control" aria-label="Source control" onClick={refreshDiff}><GitCompare size={22} strokeWidth={1.5}/></button>
+        <button className={chatOpen ? 'active' : ''} title="Agent chat" aria-label="Agent chat" onClick={() => setChatOpen(old => !old)}><MessageSquare size={22} strokeWidth={1.5}/></button>
       </nav>
 
       {layout.sidebar && <>
@@ -428,31 +448,34 @@ export default function App() {
           </div>
         </div>
 
-        {layout.panel && <>
-          <div className="sash horizontal" role="separator" aria-orientation="horizontal" aria-label="Resize panel" onPointerDown={resize('panel', 'y', -1)}/>
-          <section className="panel" style={{ height: sizes.panel }}>
+        <>
+          <div className="sash horizontal" role="separator" aria-orientation="horizontal" aria-label="Resize panel" style={{ display: layout.panel ? undefined : 'none' }} onPointerDown={resize('panel', 'y', -1)}/>
+          <section className="panel" style={{ height: sizes.panel, display: layout.panel ? 'flex' : 'none' }}>
             <nav className="panel-tabs">
               <button className={dock === 'events' ? 'selected' : ''} onClick={() => setDock('events')}>Timeline{events.length > 0 && <span className="badge">{events.length}</span>}</button>
               <button className={dock === 'console' ? 'selected' : ''} onClick={() => setDock('console')}>Console</button>
+              <button className={dock === 'terminal' ? 'selected' : ''} title="Terminal (Ctrl+`)" onClick={() => setDock('terminal')}>Terminal</button>
               <button className={dock === 'approvals' ? 'selected' : ''} onClick={() => setDock('approvals')}>Approvals{approvals.length > 0 && <span className="badge attention">{approvals.length}</span>}</button>
               <span className="panel-status"><span className={`state-dot ${inspection?.run.status ?? 'pending'}`}/>{inspection?.run.status.replaceAll('_', ' ') ?? 'No active run'}</span>
               <IconButton title="Close panel" onClick={() => setLayout(old => ({ ...old, panel: false }))}><X size={14}/></IconButton>
             </nav>
-            <div className="panel-content">
+            <div className="panel-content" hidden={dock === 'terminal'}>
               {dock === 'approvals' ? approvals.length ? approvals.map(approval => <div key={approval.id} className="approval-item"><ShieldCheck size={16}/><div><strong>{graph.nodes.find(node => node.id === approval.nodeId)?.label ?? approval.nodeId}</strong><p>{approval.message ?? 'Review this node before continuing.'}</p><code>{stringify(approval.scope ?? {})}</code></div><button className="secondary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: false }); })}>Reject</button><button className="primary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: true }); })}>Approve</button></div>) : <p className="panel-empty">No pending approvals. Requests appear here when a run needs your decision.</p>
                 : dock === 'console' ? <pre className="console-output">{events.filter(event => (!selectedId || event.nodeId === selectedId) && /output|stream|log|tool|error|failed/.test(event.kind)).map(event => `${time(event.timestamp)}  ${event.kind}\n${stringify(event.payload)}`).join('\n\n') || (selectedId ? 'No output recorded for the selected node.' : 'Command output and provider events appear here. Select a node to filter.')}</pre>
                 : events.length ? [...events].reverse().slice(0, 150).map(event => <div className="timeline-row" key={event.eventId}><time>{time(event.timestamp)}</time><span className={`state-dot ${event.kind.includes('fail') ? 'failed' : event.kind.includes('approval') ? 'waiting_approval' : 'succeeded'}`}/><strong>{event.kind}</strong><span>{event.nodeId ? graph.nodes.find(node => node.id === event.nodeId)?.label ?? event.nodeId : 'Workflow'}</span><code>{stringify(event.payload)}</code></div>) : <p className="panel-empty">Run a workflow to see live events. Commands and provider actions are recorded as they happen.</p>}
             </div>
+            {project ? <TerminalPanel key={`${project.id}:${terminalGeneration}`} ref={terminalController} project={project} visible={layout.panel && dock === 'terminal'} onActiveCount={terminalCountChanged}/> : dock === 'terminal' && <div className="panel-empty">Open a folder to start a terminal.</div>}
           </section>
-        </>}
+        </>
       </main>
 
-      {layout.inspector && <>
+      {layout.inspector && !chatOpen && <>
         <div className="sash vertical" role="separator" aria-orientation="vertical" aria-label="Resize inspector" onPointerDown={resize('inspector', 'x', -1)}/>
         <aside className="inspector" style={{ width: sizes.inspector }}>
           <div className="view-title"><span>{selected ? 'Node' : edge ? 'Connection' : 'Workflow'}</span>{(selected || edge) && <IconButton title="Close inspector selection" onClick={() => { setSelectedId(undefined); setSelectedEdge(undefined); }}><X size={14}/></IconButton>}</div>
           <div className="inspector-scroll">{selected ? <>
             <div className="inspector-kind">{(() => { const Icon = nodeIcons[selected.kind]; return <Icon size={14}/>; })()}{NODE_LABELS[selected.kind]}</div>
+            {selected.kind === 'agent' && selected.config.provider !== 'demo' && <button className="secondary block" onClick={() => { setChatContextRequest(old => ({ nodeId: selected.id, version: (old?.version ?? 0) + 1 })); setChatOpen(true); }}><MessageSquare size={13}/>Chat with this agent</button>}
             <Field label="Name"><input value={selected.label} onChange={event => changeNode({ label: event.target.value })}/></Field>
             {selected.kind === 'agent' && <><Field label="Provider"><select value={selected.config.provider} onChange={event => changeConfig({ provider: event.target.value })}><option value="codex">OpenAI Codex</option><option value="claude">Claude</option><option value="demo">Demo — deterministic test fixture</option></select></Field><Field label="Model (optional)"><input value={selected.config.model ?? ''} placeholder="Provider default" onChange={event => changeConfig({ model: event.target.value || undefined })}/></Field><Field label="Instructions"><textarea rows={7} placeholder="Describe the task and acceptance criteria…" value={selected.config.instructions} onChange={event => changeConfig({ instructions: event.target.value })}/></Field><Field label="Workspace permission"><select value={selected.config.permission} onChange={event => changeConfig({ permission: event.target.value })}><option value="read-only">Read only</option><option value="scoped-edit">Scoped edit in isolated worktree</option></select></Field></>}
             {selected.kind === 'command' && <><Field label="Executable"><input value={selected.config.command} onChange={event => changeConfig({ command: event.target.value })}/></Field><Field label="Arguments (one per line)"><textarea rows={4} value={selected.config.args.join('\n')} onChange={event => changeConfig({ args: event.target.value.split('\n').filter(Boolean) })}/></Field><p className="field-help">Arguments are passed directly. Shell syntax is not expanded. Command execution requires approval.</p></>}
@@ -484,6 +507,8 @@ export default function App() {
           </>}</div>
         </aside>
       </>}
+      {project && <ChatPanel key={project.id} project={project} graph={graph} visible={chatOpen} contextRequest={chatContextRequest} runId={selectedRun?.graph.id === graph.id && selectedRun.graph.nodes.some(node => node.id === chatContextRequest?.nodeId) ? runId : undefined} onClose={() => setChatOpen(false)}/>}
+      {!project && chatOpen && <aside className="chat-panel"><div className="chat-heading">Agent chat<IconButton title="Close chat" onClick={() => setChatOpen(false)}><X size={15}/></IconButton></div><div className="chat-empty"><h3>Open a folder to start chatting</h3><p>Choose a folder so your conversation has a project to work with.</p><button className="primary" onClick={openFolder}>Open Folder</button></div></aside>}
     </div>
 
     <footer className="status-bar">

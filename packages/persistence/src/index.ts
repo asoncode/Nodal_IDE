@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Graph, ExecutionEvent, NodeAttempt, ApprovalRequest, RunCheckpoint, WorkflowRun, Artifact } from '../../shared/src/index.js';
+import type { ChatSession, ChatTurn, ChatEvent } from '../../shared/src/chat.js';
 
 export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 export function redact<T>(value: T): T {
@@ -41,11 +42,17 @@ export class Store {
       CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), node_id TEXT NOT NULL, decision TEXT NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS checkpoints(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), node_id TEXT, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS provider_config(id TEXT PRIMARY KEY, provider TEXT NOT NULL, nonsecret_settings_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS chats(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS chat_turns(id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES chats(id), json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS chat_events(id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES chats(id), sequence INTEGER NOT NULL, json TEXT NOT NULL, UNIQUE(chat_id,sequence));
+      CREATE INDEX IF NOT EXISTS chats_project ON chats(project_id);
+      CREATE INDEX IF NOT EXISTS chat_turns_chat ON chat_turns(chat_id);
       CREATE INDEX IF NOT EXISTS events_run_sequence ON events(run_id,monotonic_sequence);
       CREATE INDEX IF NOT EXISTS attempts_run ON node_attempts(run_id,node_id);
       CREATE INDEX IF NOT EXISTS approvals_run ON approvals(run_id,decision);
       CREATE INDEX IF NOT EXISTS runs_project ON runs(project_id);
       INSERT OR IGNORE INTO migrations VALUES(1,datetime('now'));
+      INSERT OR IGNORE INTO migrations VALUES(2,datetime('now'));
     `));
   }
   transaction<T>(action: () => T): T {
@@ -61,6 +68,27 @@ export class Store {
     return (this.db.prepare(sql).all(...args) as { json: string }[]).map(row => JSON.parse(row.json) as T);
   }
   projects(): Project[] { return this.many('SELECT json FROM projects ORDER BY rowid DESC'); }
+  saveChat<T extends ChatSession>(session: T): T {
+    this.db.prepare('INSERT INTO chats VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(session.id, session.projectId, json(session)); return session;
+  }
+  chat<T extends ChatSession = ChatSession>(id: string): T { const chat = this.one<T>('SELECT json FROM chats WHERE id=?', id); if (!chat) throw new Error('Chat not found'); return chat; }
+  chats(projectId: string): ChatSession[] { return this.many('SELECT json FROM chats WHERE project_id=? ORDER BY rowid DESC LIMIT 100', projectId); }
+  saveChatTurn(turn: ChatTurn): void { this.db.prepare('INSERT INTO chat_turns VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(turn.id, turn.chatId, json(turn)); }
+  chatTurns(chatId: string): ChatTurn[] { return this.many('SELECT json FROM chat_turns WHERE chat_id=? ORDER BY rowid', chatId); }
+  chatEvents(chatId: string): ChatEvent[] { return this.many('SELECT json FROM (SELECT rowid,json FROM chat_events WHERE chat_id=? ORDER BY rowid DESC LIMIT 200) ORDER BY rowid', chatId); }
+  appendChatEvent(event: Omit<ChatEvent, 'sequence'>): void {
+    const row = this.db.prepare('SELECT COALESCE(MAX(sequence),0) AS sequence FROM chat_events WHERE chat_id=?').get(event.chatId) as { sequence: number };
+    const stored = { ...event, sequence: row.sequence + 1 };
+    this.db.prepare('INSERT INTO chat_events VALUES(?,?,?,?)').run(stored.id, stored.chatId, stored.sequence, json(stored));
+    this.db.prepare('DELETE FROM chat_events WHERE chat_id=? AND sequence<=?').run(stored.chatId, stored.sequence - 200);
+  }
+  recoverChats(): void {
+    for (const turn of this.many<ChatTurn>('SELECT json FROM chat_turns')) if (turn.status === 'running') {
+      this.saveChatTurn({ ...turn, status: 'interrupted', error: 'Nodal restarted. This message was not repeated. Start a new chat to continue with fresh provider context.', finishedAt: now(), approval: undefined });
+      const chat = this.chat<ChatSession & { providerSessionId?: string }>(turn.chatId);
+      this.saveChat({ ...chat, providerSessionId: undefined });
+    }
+  }
   project(id: string): Project { const p = this.one<Project>('SELECT json FROM projects WHERE id=?', id); if (!p) throw new Error('Project not found'); return p; }
   addProject(root: string, name: string, branch?: string, isGitRepository = true): Project {
     const existing = this.one<Project>('SELECT json FROM projects WHERE repository_root=?', root);
