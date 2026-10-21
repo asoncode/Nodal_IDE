@@ -101,6 +101,11 @@ textarea { resize: vertical; line-height: 1.5; }
 /* Side bar */
 .sidebar { flex-shrink: 0; display: flex; flex-direction: column; min-height: 0; background: var(--bg-side); border-right: 1px solid var(--border); }
 .view-title { height: 35px; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 20px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--fg-muted); }
+.explorer-actions { display: flex; align-items: center; }
+.new-file-form { margin: 4px 12px 6px; }
+.new-file-input { display: flex; align-items: center; gap: 6px; color: var(--fg-muted); }
+.new-file-input input { min-width: 0; width: 100%; height: 24px; }
+.new-file-form .inline-error { margin-top: 4px; }
 .view-title small { font-size: 11px; color: var(--fg-dim); }
 .section-header { height: 22px; display: flex; align-items: center; gap: 2px; padding: 0 8px 0 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--fg); }
 .section-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

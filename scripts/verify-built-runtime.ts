@@ -30,6 +30,10 @@ try {
   const repo=join(dir,'project');await mkdir(repo);
   const git=spawnSync('git',['init','-b','main'],{cwd:repo,encoding:'utf8'});assert.equal(git.status,0,git.stderr);
   const project=await api<{id:string}>('openProject',{path:repo});
+  const file=await api<{path:string;content:string;hash:string}>('createFile',{projectId:project.id,path:'main.cpp'});
+  assert.equal(file.content,'');assert.equal(file.path,'main.cpp');
+  await api('writeFile',{projectId:project.id,path:file.path,content:'int main() {}',expectedHash:file.hash});
+  const saved=await api<{content:string}>('readFile',{projectId:project.id,path:file.path});assert.equal(saved.content,'int main() {}');
   const owner={projectId:project.id,ownerId:randomUUID()};
   const terminal=await api<TerminalSession>('createTerminal',{...owner,cols:80,rows:24});
   const scope={...owner,terminalId:terminal.id};
@@ -45,5 +49,5 @@ try {
   assert(output.includes('NODAL_BUNDLE_SHELL_OK'),'Built terminal never returned command output');
   await api('closeTerminals',owner);
   child.stdin.end();assert.equal(await exit,0,stderr);
-  console.log('PASS built runtime imports, SQLite migration, private launch handshake, desktop-origin API, templates, real PTY command/resize/cleanup, and graceful shutdown');
+  console.log('PASS built runtime imports, SQLite migration, private launch handshake, desktop-origin API, templates, file creation/save, real PTY command/resize/cleanup, and graceful shutdown');
 } finally {clearTimeout(timer);if(child.exitCode===null) {child.stdin.end();await exit;}await rm(dir,{recursive:true,force:true});}

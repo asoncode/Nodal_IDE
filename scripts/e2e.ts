@@ -30,6 +30,7 @@ async function eventually(check:()=>Promise<boolean>, message:string, timeout=20
 // gstack permits uploads from /tmp and the workspace; macOS Node defaults to /var/folders.
 const temp=await mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(),'nodal-ui-'));
 const repo=join(temp,'project'), data=join(temp,'data'); await mkdir(repo);
+await mkdir(join(repo,'src'));
 await writeFile(join(repo,'index.js'),'export const answer = 42;\n');
 for(const args of [['init','-b','main'],['add','--','.'],['-c','user.name=Nodal Test','-c','user.email=test@localhost','commit','-m','Initial']]) {
   const result=await git(repo,args); assert.equal(result.exitCode,0,result.stderr);
@@ -106,6 +107,19 @@ try {
   await browse('click','button[aria-label="Source control"]');
   await eventually(async()=> (await browse('text')).includes('+export const answer = 43'),'Git diff not visible');
   console.log('PASS Monaco edit/save with exact disk bytes and Git diff inspection');
+
+  await browse('click','button[aria-label="New File"]');
+  await browse('fill','input[aria-label="New file path"]','src/main.cpp');
+  await browse('press','Enter');
+  await eventually(async()=> (await readFile(join(repo,'src/main.cpp'),'utf8').catch(()=>undefined))==='','Explorer did not create an empty file');
+  await browse('wait','.file-list button[title="src/main.cpp"]');
+  await browse('wait','.editor-tab.active:has-text("main.cpp")');
+  await browse('click','.monaco-editor .view-lines');
+  const createdContent='int main() { return 0; }';
+  await browse('type',createdContent);
+  await browse('click','.command-actions button[aria-label="Save"]');
+  await eventually(async()=> (await readFile(join(repo,'src/main.cpp'),'utf8'))===createdContent,'New file did not save through Monaco');
+  console.log('PASS Explorer file creation in an existing folder, automatic editor opening, and exact saved bytes');
 
   await browse('click','.editor-tab[data-tab="replay"] button');
   await eventually(async()=> (await browse('text')).includes('run › completed'),'Historical run events not visible');

@@ -10,19 +10,39 @@ export class FileConflictError extends Error {
   constructor() { super('File changed on disk. Reload or compare before saving.'); this.name = 'FileConflictError'; }
 }
 
-/** Resolve every component without following symlinks, including links inside the root. */
-export async function resolveWorkspacePath(root: string, relativePath: string): Promise<string> {
+/** Resolve without following links; creation may allow only the final component to be missing. */
+export async function resolveWorkspacePath(root: string, relativePath: string, allowMissingLeaf = false): Promise<string> {
   if (!relativePath || path.isAbsolute(relativePath) || relativePath.includes('\0') || relativePath.includes('\\')) throw new Error('Expected a relative workspace path.');
   const parts = relativePath.split('/');
   if (parts.some((part) => !part || part === '..' || part === '.' || part.toLowerCase() === '.git')) throw new Error('Path traversal or Git metadata access denied.');
   const base = await realpath(root);
   let current = base;
-  for (const part of parts) {
+  for (const [index, part] of parts.entries()) {
     current = path.join(current, part);
-    const info = await lstat(current);
-    if (info.isSymbolicLink() || (info.isFile() && info.nlink > 1)) throw new Error('Linked file access denied.');
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink() || (info.isFile() && info.nlink > 1)) throw new Error('Linked file access denied.');
+    } catch (error) {
+      if (!allowMissingLeaf || index !== parts.length - 1 || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
   return current;
+}
+
+export async function createFile(root: string, relativePath: string): Promise<{ path: string; content: string; hash: string }> {
+  if (!relativePath.trim()) throw new Error('Enter a file name.');
+  try {
+    const absolute = await resolveWorkspacePath(root, relativePath, true);
+    // Exclusive creation also protects against another editor creating the same path.
+    const handle = await open(absolute, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666);
+    await handle.close();
+    return { path: relativePath, content: '', hash: hashContent('') };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') throw new Error('A file or folder already exists at this path.');
+    if (code === 'ENOENT') throw new Error('Parent folder does not exist. Choose an existing folder.');
+    throw error;
+  }
 }
 
 export type FileEntry = { path: string; size: number };

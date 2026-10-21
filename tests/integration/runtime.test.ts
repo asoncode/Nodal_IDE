@@ -25,6 +25,17 @@ beforeEach(async () => {
 });
 afterEach(async () => { await service.close(); store.close(); await rm(root,{recursive:true,force:true}); });
 describe('real workflow vertical slice', () => {
+  it('creates and edits files through the project API without overwriting existing content', async () => {
+    const created = await service.dispatch('createFile', { projectId, path: 'main.cpp' }) as { path: string; content: string; hash: string };
+    expect(created.path).toBe('main.cpp'); expect(created.content).toBe('');
+    expect(await service.dispatch('files', { projectId })).toContain('main.cpp');
+    await service.dispatch('writeFile', { projectId, path: created.path, content: 'int main() {}', expectedHash: created.hash });
+    await expect(service.dispatch('createFile', { projectId, path: created.path })).rejects.toThrow('already exists');
+    expect(await readFile(join(root, 'main.cpp'), 'utf8')).toBe('int main() {}');
+    await expect(service.dispatch('createFile', { projectId, path: '../escape.py' })).rejects.toThrow();
+    await expect(service.dispatch('createFile', { projectId: 'unknown', path: 'file.md' })).rejects.toThrow();
+    await expect(service.dispatch('createFile', { projectId, path: 'file.md', content: 'unexpected' })).rejects.toThrow();
+  });
   it('opens an ordinary folder and edits files without initializing Git', async () => {
     const folder = join(root, 'plain-folder'); await mkdir(folder); await writeFile(join(folder, 'notes.txt'), 'hello');
     const opened = await service.dispatch('openProject', { path: folder }) as { id: string; isGitRepository: boolean };

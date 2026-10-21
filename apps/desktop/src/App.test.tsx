@@ -5,12 +5,12 @@ import { act as reactAct, cleanup, fireEvent, render, screen, waitFor, within } 
 import App from './App.js';
 import { api } from './api.js';
 import { isDesktop, pickFolder, restoreLastProject, listenDesktopActions } from './desktop.js';
-import { createNode, emptyGraph, type Graph } from './model.js';
+import { createNode, emptyGraph, language, type Graph } from './model.js';
 
 vi.mock('./api.js', () => ({ api: vi.fn() }));
 vi.mock('./desktop.js', () => ({ isDesktop: vi.fn(), pickFolder: vi.fn(), restoreLastProject: vi.fn(), listenDesktopActions: vi.fn() }));
 vi.mock('@monaco-editor/react', () => ({
-  default: ({ value, onChange }: { value: string; onChange: (value: string) => void }) => <textarea aria-label="Source editor" value={value} onChange={event => onChange(event.target.value)}/>,
+  default: ({ value, onChange, language }: { value: string; onChange: (value: string) => void; language: string }) => <textarea data-language={language} aria-label="Source editor" value={value} onChange={event => onChange(event.target.value)}/>,
   DiffEditor: ({ original, modified }: { original: string; modified: string }) => <div aria-label="File comparison">{original} → {modified}</div>,
 }));
 vi.mock('@xyflow/react', () => ({
@@ -37,6 +37,7 @@ beforeEach(() => {
     const results: Record<string, unknown> = {
       bootstrap: { projects: [project], templates: [], providers: [] }, files: params.projectId === 'plain-folder' ? ['notes.txt'] : ['src/example.ts'], listGraphs: params.projectId === 'plain-folder' ? [] : [graph], runs: [],
       openProject: { id: 'plain-folder', name: 'plain-folder', root: '/tmp/plain-folder', isGitRepository: false },
+      createFile: { path: params.path, content: '', hash: 'c'.repeat(64) },
       readFile: { content: 'export const answer = 1;', hash: 'a'.repeat(64) }, writeFile: { content: params.content, hash: 'b'.repeat(64) },
       saveGraph: params.graph, generateGraph: { graph: generation, summary: 'A validated plan.' },
       run: { id: 'run-1', projectId: project.id, graph, status: 'running', createdAt: new Date().toISOString() },
@@ -97,6 +98,98 @@ describe('workspace flows', () => {
     fireEvent.change(editor, { target: { value: 'export const answer = 42;' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(calls.find(call => call.method === 'writeFile')?.params).toEqual({ projectId: project.id, path: 'src/example.ts', content: 'export const answer = 42;', expectedHash: 'a'.repeat(64) }));
+  });
+
+  it.each([['src/main.cpp', 'cpp'], ['script.py', 'python'], ['README.MD', 'markdown']])('creates %s and opens an empty saved editor with %s syntax', async (path, syntax) => {
+    await ready();
+    fireEvent.change(screen.getByLabelText('Search files'), { target: { value: 'missing' } });
+    fireEvent.click(screen.getByRole('button', { name: 'New File' }));
+    const input = screen.getByRole('textbox', { name: 'New file path' });
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: path } });
+    fireEvent.submit(input.closest('form')!);
+    const editor = await screen.findByRole('textbox', { name: 'Source editor' });
+    expect(editor).toHaveProperty('value', '');
+    expect(editor.getAttribute('data-language')).toBe(syntax);
+    expect(calls.find(call => call.method === 'createFile')?.params).toEqual({ projectId: project.id, path });
+    expect(screen.getByRole('button', { name: path })).toBeTruthy();
+    expect(screen.getByLabelText('Search files')).toHaveProperty('value', '');
+    expect(screen.queryByRole('textbox', { name: 'New file path' })).toBeNull();
+    fireEvent.change(editor, { target: { value: 'new content' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls.find(call => call.method === 'writeFile')?.params).toEqual({ projectId: project.id, path, content: 'new content', expectedHash: 'c'.repeat(64) }));
+  });
+
+  it('keeps the path open when Enter confirms an IME composition', async () => {
+    await ready(); fireEvent.click(screen.getByRole('button', { name: 'New File' }));
+    const input = screen.getByRole('textbox', { name: 'New file path' });
+    fireEvent.change(input, { target: { value: 'notes.md' } });
+    const event = new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true });
+    fireEvent(input, event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(calls.some(call => call.method === 'createFile')).toBe(false);
+    expect(input).toHaveProperty('value', 'notes.md');
+  });
+
+  it('keeps a failed creation draft and allows cancellation without opening the existing file', async () => {
+    await ready();
+    const implementation = vi.mocked(api).getMockImplementation()!;
+    vi.mocked(api).mockImplementation((method, params) => {
+      if (method !== 'createFile') return implementation(method, params);
+      calls.push({ method, params: params ?? {} });
+      return Promise.reject(new Error('File already exists'));
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'New File' }));
+    const input = screen.getByRole('textbox', { name: 'New file path' });
+    fireEvent.change(input, { target: { value: 'src/example.ts' } });
+    fireEvent.submit(input.closest('form')!);
+    await screen.findByRole('alert');
+    expect(input).toHaveProperty('value', 'src/example.ts');
+    expect(screen.queryByRole('textbox', { name: 'Source editor' })).toBeNull();
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByRole('textbox', { name: 'New file path' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'New File' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel new file' }));
+    expect(screen.queryByRole('textbox', { name: 'New file path' })).toBeNull();
+    expect(vi.mocked(api).mock.calls.filter(([method]) => method === 'createFile')).toHaveLength(1);
+  });
+
+  it('preserves unsaved content when creating a path that is already open', async () => {
+    await ready(); fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' }));
+    const editor = await screen.findByRole('textbox', { name: 'Source editor' });
+    fireEvent.change(editor, { target: { value: 'unsaved code' } });
+    fireEvent.click(screen.getByRole('button', { name: 'New File' }));
+    const input = screen.getByRole('textbox', { name: 'New file path' });
+    fireEvent.change(input, { target: { value: 'src/example.ts' } });
+    fireEvent.submit(input.closest('form')!);
+    await screen.findByText('This file is already open. Close it before creating it again.');
+    expect(editor).toHaveProperty('value', 'unsaved code');
+    expect(input).toHaveProperty('value', 'src/example.ts');
+    expect(calls.some(call => call.method === 'createFile')).toBe(false);
+  });
+
+  it('submits only one creation while a request is pending and ignores a result after switching folders', async () => {
+    vi.mocked(isDesktop).mockReturnValue(true); vi.mocked(pickFolder).mockResolvedValue('/tmp/plain-folder');
+    await ready();
+    const implementation = vi.mocked(api).getMockImplementation()!;
+    let resolveCreation!: (value: unknown) => void;
+    const pending = new Promise(resolve => { resolveCreation = resolve; });
+    vi.mocked(api).mockImplementation((method, params) => {
+      if (method !== 'createFile') return implementation(method, params);
+      calls.push({ method, params: params ?? {} });
+      return pending as Promise<never>;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'New File' }));
+    const input = screen.getByRole('textbox', { name: 'New file path' });
+    fireEvent.change(input, { target: { value: 'later.py' } });
+    fireEvent.submit(input.closest('form')!); fireEvent.submit(input.closest('form')!);
+    expect(calls.filter(call => call.method === 'createFile')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Folder' }));
+    await screen.findByRole('button', { name: 'notes.txt' });
+    await reactAct(async () => { resolveCreation({ path: 'later.py', content: '', hash: 'c'.repeat(64) }); });
+    expect(screen.queryByRole('button', { name: 'later.py' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Source editor' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'New file path' })).toBeNull();
   });
 
   it('shows runtime events and requires an explicit decision for command approval', async () => {
@@ -210,4 +303,10 @@ describe('terminal integration', () => {
       expect(screen.getByRole('button', { name: 'Toggle panel' }).getAttribute('aria-pressed')).toBe('true');
     } finally { terminal.remove(); }
   });
+});
+
+describe('file languages', () => {
+  it.each(['py', 'src.py/readme', 'src/readme'])('keeps extensionless %s as plain text', path => { expect(language(path)).toBe('plaintext'); });
+  it.each(['cpp', 'cc', 'cxx', 'hpp'])('recognizes .%s regardless of case', extension => { expect(language(`src/main.${extension.toUpperCase()}`)).toBe('cpp'); });
+  it.each(['c', 'h'])('recognizes .%s as C', extension => { expect(language(`src/main.${extension}`)).toBe('c'); });
 });

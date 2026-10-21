@@ -19,6 +19,7 @@ export function emptyGraph(): Graph {
   return { schemaVersion: 1, id: crypto.randomUUID(), name: 'Untitled workflow', revision: 1, nodes: [start, end], edges: [{ id: crypto.randomUUID(), source: start.id, target: end.id, kind: 'control' }], settings: { maxConcurrency: 3, maxTotalAttempts: 30, timeoutMs: 600000 } };
 }
 export function language(path: string) {
-  const extension = path.split('.').at(-1);
-  return ({ ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', json: 'json', md: 'markdown', css: 'css', html: 'html', py: 'python', rs: 'rust', yml: 'yaml', yaml: 'yaml', sh: 'shell', toml: 'ini' } as Record<string, string>)[extension ?? ''] ?? 'plaintext';
+  const filename = path.split('/').at(-1) ?? '';
+  const extension = filename.includes('.') ? filename.split('.').at(-1)?.toLowerCase() : '';
+  return ({ ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript', json: 'json', md: 'markdown', css: 'css', html: 'html', py: 'python', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', c: 'c', h: 'c', rs: 'rust', yml: 'yaml', yaml: 'yaml', sh: 'shell', toml: 'ini' } as Record<string, string>)[extension ?? ''] ?? 'plaintext';
 }

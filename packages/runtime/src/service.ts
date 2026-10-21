@@ -35,6 +35,7 @@ const requestSchemas = {
   openProject: z.object({ path: z.string().min(1).max(4096) }).strict(),
   files: projectParams,
   readFile: projectParams.extend({ path: z.string().min(1).max(4096) }),
+  createFile: projectParams.extend({ path: z.string().min(1).max(4096) }),
   writeFile: projectParams.extend({ path: z.string().min(1).max(4096), content: z.string().max(2 * 1024 * 1024), expectedHash: z.string().length(64) }),
   listGraphs: projectParams,
   saveGraph: projectParams.extend({ graph: GraphSchema }),
@@ -107,6 +108,7 @@ export class NodalService {
       }
       case 'files': return (await workspace.listFiles(this.store.project(projectId).root)).map(f => f.path);
       case 'readFile': return workspace.readFile(this.store.project(projectId).root, params.path as string);
+      case 'createFile': return workspace.createFile(this.store.project(projectId).root, params.path as string);
       case 'writeFile': {
         const result = await workspace.writeFile(this.store.project(projectId).root, params.path as string, params.content as string, params.expectedHash as string);
         return { ...result, content: params.content, path: params.path };

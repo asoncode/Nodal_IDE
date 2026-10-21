@@ -3,7 +3,7 @@ import { chmod, link, mkdtemp, mkdir, readFile as fsReadFile, writeFile as fsWri
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  runProcess, readFile, writeFile, listFiles, git, inspectRepository, createAttemptWorktree,
+  runProcess, readFile, writeFile, createFile, hashContent, listFiles, git, inspectRepository, createAttemptWorktree,
   commitAttempt, previewMerge, mergeAttempt,
 } from '../src/index.js';
 
@@ -24,6 +24,36 @@ async function fixture() {
 }
 
 describe('safe local files', () => {
+  it('creates empty files with arbitrary extensions and saves using the returned hash', async () => {
+    const { repo } = await fixture();
+    await mkdir(path.join(repo, 'src'));
+    for (const name of ['script.py', 'src/main.cpp', 'README.md', '.gitignore', 'LICENSE']) {
+      const created = await createFile(repo, name);
+      expect(created).toEqual({ path: name, content: '', hash: hashContent('') });
+      expect(await fsReadFile(path.join(repo, name), 'utf8')).toBe('');
+    }
+    await writeFile(repo, 'src/main.cpp', 'int main() {}\n', hashContent(''));
+    expect(await fsReadFile(path.join(repo, 'src/main.cpp'), 'utf8')).toBe('int main() {}\n');
+    expect((await listFiles(repo)).map(file => file.path)).toContain('src/main.cpp');
+  });
+  it('never overwrites existing files or directories, including concurrent creation', async () => {
+    const { repo } = await fixture();
+    await mkdir(path.join(repo, 'src'));
+    for (const name of ['file.txt', 'src']) await expect(createFile(repo, name)).rejects.toThrow('already exists');
+    const attempts = await Promise.allSettled([createFile(repo, 'race.md'), createFile(repo, 'race.md')]);
+    expect(attempts.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(await fsReadFile(path.join(repo, 'file.txt'), 'utf8')).toBe('original\n');
+  });
+  it('rejects invalid paths, Git internals, linked parents, and missing parent folders', async () => {
+    const { root, repo } = await fixture();
+    await symlink(root, path.join(repo, 'linked-dir'));
+    await symlink(path.join(root, 'missing-target'), path.join(repo, 'linked-file'));
+    for (const name of ['', ' ', '../outside.py', '/tmp/outside.py', '.git/new.md', '.GIT/new.md', './new.py', 'src\\new.py', 'linked-dir/outside.py', 'linked-file']) {
+      await expect(createFile(repo, name)).rejects.toThrow();
+    }
+    await expect(createFile(repo, 'missing/new.py')).rejects.toThrow('Parent folder');
+    await expect(fsReadFile(path.join(root, 'outside.py'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('edits a file using its read hash and detects external changes', async () => {
     const { repo } = await fixture();
     const initial = await readFile(repo, 'file.txt');

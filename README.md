@@ -43,6 +43,8 @@ Open the full URL printed in the terminal. It includes a temporary connection to
 
 In the desktop app, choose **File → Open Folder…**, then select a folder. Click a file in Explorer to open it and choose **File → Save** when you're ready to save.
 
+To create a file, click **New File** in the Explorer header, enter a name such as `script.py`, `main.cpp`, or `notes.md`, and press **Enter**. Nodal creates the empty file and opens it in the editor, choosing syntax highlighting from its extension. You can also enter a path such as `src/main.cpp` inside an existing folder. Existing files are never overwritten; press **Escape** to cancel.
+
 | Action | macOS | Windows / Linux shortcut |
 | --- | --- | --- |
 | Open folder | `⌘O` | `Ctrl+O` |

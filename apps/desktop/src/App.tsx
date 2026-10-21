@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlow, Background, BackgroundVariant, Controls, MiniMap, Handle, Position, applyNodeChanges, applyEdgeChanges, type Node as FlowNode, type Edge as FlowEdge, type Connection, type ReactFlowInstance } from '@xyflow/react';
 import Editor, { DiffEditor } from '@monaco-editor/react';
-import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, CirclePlay, Bot, SquareTerminal, GitFork, Split, Merge, Repeat, UserCheck, GitMerge, Flag, CircleX, CircleCheck, type LucideIcon } from 'lucide-react';
+import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, FilePlus2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, CirclePlay, Bot, SquareTerminal, GitFork, Split, Merge, Repeat, UserCheck, GitMerge, Flag, CircleX, CircleCheck, type LucideIcon } from 'lucide-react';
 import { api } from './api.js';
 import ChatPanel from './ChatPanel.js';
 import TerminalPanel, { type TerminalPanelHandle } from './TerminalPanel.js';
@@ -79,6 +79,10 @@ export default function App() {
   const [sizes, setSizes] = useState({ sidebar: 260, panel: 220, inspector: 300 });
   const [files, setFiles] = useState<string[]>([]);
   const [fileSearch, setFileSearch] = useState('');
+  const [newFilePath, setNewFilePath] = useState<string>();
+  const [newFileError, setNewFileError] = useState('');
+  const [creatingFile, setCreatingFile] = useState(false);
+  const createFileRequest = useRef<symbol | null>(null);
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [buffers, setBuffers] = useState<FileBuffer[]>([]);
   const [activeFile, setActiveFile] = useState<string>();
@@ -166,6 +170,7 @@ export default function App() {
   }, []);
   const loadProject = useCallback(async (selectedProject: Project, discardConfirmed = false) => {
     if (!discardConfirmed && !confirmFolderSwitch()) return false;
+    createFileRequest.current = null; setNewFilePath(undefined); setNewFileError(''); setCreatingFile(false);
     const [nextFiles, nextGraphs, nextRuns] = await Promise.all([api<string[]>('files', { projectId: selectedProject.id }), api<Graph[]>('listGraphs', { projectId: selectedProject.id }), api<Run[]>('runs', { projectId: selectedProject.id })]);
     const nextGraph = nextGraphs[0] ?? emptyGraph();
     graphRef.current = nextGraph; graphBaseline.current = JSON.stringify(nextGraph);
@@ -291,6 +296,28 @@ export default function App() {
     if (!buffers.some(buffer => buffer.path === path)) { const file = await api<{ content: string; hash: string }>('readFile', { projectId: project.id, path }); setBuffers(items => [...items, { path, ...file, savedContent: file.content }]); }
     setActiveFile(path); setTab('code'); setModal(null);
   });
+  const createFile = async () => {
+    if (!project || newFilePath === undefined || !newFilePath.trim() || createFileRequest.current) return;
+    if (buffersRef.current.some(buffer => buffer.path === newFilePath)) { setNewFileError('This file is already open. Close it before creating it again.'); return; }
+    const request = Symbol();
+    createFileRequest.current = request; setCreatingFile(true); setNewFileError('');
+    try {
+      const file = await api<{ path: string; content: string; hash: string }>('createFile', { projectId: project.id, path: newFilePath });
+      if (createFileRequest.current !== request || projectRef.current?.id !== project.id) return;
+      setFiles(items => [...new Set([...items, file.path])].sort((a, b) => a.localeCompare(b)));
+      setBuffers(items => items.some(buffer => buffer.path === file.path) ? items : [...items, { ...file, savedContent: file.content }]);
+      setOpenFolders(old => {
+        const next = { ...old }, parts = file.path.split('/');
+        for (let index = 1; index < parts.length; index++) next[parts.slice(0, index).join('/')] = true;
+        return next;
+      });
+      setFileSearch(''); setActiveFile(file.path); setTab('code'); setNewFilePath(undefined); setMessage(`Created ${file.path}`);
+    } catch (cause) {
+      if (createFileRequest.current === request) setNewFileError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (createFileRequest.current === request) { createFileRequest.current = null; setCreatingFile(false); }
+    }
+  };
   const closeFile = (buffer: FileBuffer) => {
     if (buffer.content !== buffer.savedContent && !window.confirm(`Discard unsaved edits to ${buffer.path}?`)) return;
     const remaining = buffers.filter(item => item.path !== buffer.path);
@@ -354,9 +381,16 @@ export default function App() {
       {layout.sidebar && <>
         <aside className="sidebar" style={{ width: sizes.sidebar }}>
           {view === 'explorer' && <>
-            <div className="view-title"><span>Explorer</span><IconButton title="Open Folder" onClick={openFolder}><FolderOpen size={15}/></IconButton></div>
+            <div className="view-title"><span>Explorer</span><div className="explorer-actions"><IconButton title="New File" disabled={!project || busy || creatingFile} onClick={() => { setNewFilePath(''); setNewFileError(''); }}><FilePlus2 size={15}/></IconButton><IconButton title="Open Folder" onClick={openFolder}><FolderOpen size={15}/></IconButton></div></div>
             <div className="section-header"><ChevronDown size={14}/><span>{project?.name ?? 'No folder open'}</span>{project?.branch && <small><GitBranch size={11}/>{project.branch}</small>}</div>
             {files.length > 0 && <label className="filter-input"><Search size={12}/><input aria-label="Search files" placeholder="Filter files" value={fileSearch} onChange={event => setFileSearch(event.target.value)}/></label>}
+            {newFilePath !== undefined && <form className="new-file-form" onSubmit={event => { event.preventDefault(); void createFile(); }}>
+              <div className="new-file-input"><FilePlus2 size={14}/><input autoFocus aria-label="New file path" aria-describedby={newFileError ? 'new-file-error' : undefined} aria-invalid={!!newFileError} placeholder="filename.py or src/main.cpp" value={newFilePath} disabled={creatingFile} onChange={event => { setNewFilePath(event.target.value); setNewFileError(''); }} onKeyDown={event => {
+                if (event.nativeEvent.isComposing) { if (event.key === 'Enter') event.preventDefault(); return; }
+                if (event.key === 'Escape' && !creatingFile) { event.preventDefault(); setNewFilePath(undefined); setNewFileError(''); }
+              }}/><button type="button" className="icon-button" title="Cancel new file" aria-label="Cancel new file" disabled={creatingFile} onClick={() => { setNewFilePath(undefined); setNewFileError(''); }}><X size={14}/></button></div>
+              {newFileError && <p id="new-file-error" className="inline-error" role="alert">{newFileError}</p>}
+            </form>}
             <div className="file-list">
               {fileSearch ? files.filter(path => path.toLowerCase().includes(fileSearch.toLowerCase())).slice(0, 500).map(path => <button key={path} title={path} aria-label={path} className={`tree-row file ${tab === 'code' && activeFile === path ? 'active' : ''}`} onClick={() => openFile(path)}><FileCode2 size={14}/><span>{path}</span></button>) : fileRows(tree, 0)}
               {!files.length && <div className="sidebar-empty"><p>{project ? 'This folder has no files to show.' : 'Open a folder to browse and edit its files.'}</p><button className="primary block" onClick={openFolder}>Open Folder</button></div>}
