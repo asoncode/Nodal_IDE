@@ -36,6 +36,33 @@ describe('real workflow vertical slice', () => {
     await expect(service.dispatch('createFile', { projectId: 'unknown', path: 'file.md' })).rejects.toThrow();
     await expect(service.dispatch('createFile', { projectId, path: 'file.md', content: 'unexpected' })).rejects.toThrow();
   });
+  it('exposes folder creation, rename, duplicate, bounded search and persistent trash through strict RPCs', async () => {
+    const folder = join(root, 'editor-project'); await mkdir(folder);
+    const opened = await service.dispatch('openProject', { path: folder }) as { id: string };
+    const scope = { projectId: opened.id };
+    expect(await service.dispatch('createFolder', { ...scope, path: 'empty' })).toEqual({ path: 'empty', kind: 'directory' });
+    expect(await service.dispatch('workspaceEntries', scope)).toMatchObject({ entries: [{ path: 'empty', kind: 'directory' }], truncated: false });
+    const created = await service.dispatch('createFile', { ...scope, path: 'note.txt' }) as { hash: string };
+    const written = await service.dispatch('writeFile', { ...scope, path: 'note.txt', expectedHash: created.hash, content: 'Find this sentence.' }) as { hash: string };
+    await service.dispatch('duplicateFile', { ...scope, path: 'note.txt', newPath: 'copy.txt', expectedHash: written.hash });
+    await service.dispatch('renameFile', { ...scope, path: 'copy.txt', newPath: 'renamed.txt', expectedHash: written.hash });
+    expect(await service.dispatch('searchWorkspace', { ...scope, query: 'find', caseSensitive: false, wholeWord: true })).toMatchObject({ matches: [{ path: 'note.txt', line: 1, column: 1 }, { path: 'renamed.txt', line: 1, column: 1 }], truncated: false });
+    const removed = await service.dispatch('trashFile', { ...scope, path: 'note.txt', expectedHash: written.hash }) as { trashId: string };
+    await service.close(); service = new NodalService(store, join(root, '.nodal'));
+    expect(await service.dispatch('listTrash', scope)).toEqual([{ trashId: removed.trashId, path: 'note.txt', deletedAt: expect.any(String) }]);
+    expect(await service.dispatch('restoreTrash', { ...scope, trashId: removed.trashId })).toEqual({ path: 'note.txt', content: 'Find this sentence.', hash: written.hash });
+    expect(await service.dispatch('listTrash', scope)).toEqual([]);
+    for (const [method, params] of [
+      ['renameFile', { path: 'note.txt', newPath: 'next.txt', expectedHash: 'bad' }],
+      ['trashFile', { path: 'note.txt' }],
+      ['restoreTrash', { trashId: '../escape' }],
+      ['searchWorkspace', { query: 'find', wholeWord: 'yes' }],
+      ['searchWorkspace', { query: 'a'.repeat(201) }],
+      ['workspaceEntries', { recursive: true }],
+      ['createFolder', { path: 'new', extra: true }],
+    ] as const) await expect(service.dispatch(method, { ...scope, ...params })).rejects.toThrow();
+    await expect(service.dispatch('renameFile', { projectId: 'unknown', path: 'note.txt', newPath: 'next.txt', expectedHash: written.hash })).rejects.toThrow();
+  });
   it('opens an ordinary folder and edits files without initializing Git', async () => {
     const folder = join(root, 'plain-folder'); await mkdir(folder); await writeFile(join(folder, 'notes.txt'), 'hello');
     const opened = await service.dispatch('openProject', { path: folder }) as { id: string; isGitRepository: boolean };

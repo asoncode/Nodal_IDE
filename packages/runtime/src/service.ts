@@ -33,7 +33,13 @@ const requestSchemas = {
   resizeTerminal: terminalParams.extend(terminalSize),
   closeTerminal: terminalParams, closeTerminals: terminalOwner,
   openProject: z.object({ path: z.string().min(1).max(4096) }).strict(),
-  files: projectParams,
+  files: projectParams, workspaceEntries: projectParams, listTrash: projectParams,
+  createFolder: projectParams.extend({ path: z.string().min(1).max(4096) }),
+  renameFile: projectParams.extend({ path: z.string().min(1).max(4096), newPath: z.string().min(1).max(4096), expectedHash: z.string().regex(/^[a-f0-9]{64}$/) }),
+  duplicateFile: projectParams.extend({ path: z.string().min(1).max(4096), newPath: z.string().min(1).max(4096), expectedHash: z.string().regex(/^[a-f0-9]{64}$/) }),
+  trashFile: projectParams.extend({ path: z.string().min(1).max(4096), expectedHash: z.string().regex(/^[a-f0-9]{64}$/) }),
+  restoreTrash: projectParams.extend({ trashId: z.string().uuid() }),
+  searchWorkspace: projectParams.extend({ query: z.string().min(1).max(200).refine(value => !/[\r\n]/.test(value)), caseSensitive: z.boolean().optional(), wholeWord: z.boolean().optional() }),
   readFile: projectParams.extend({ path: z.string().min(1).max(4096) }),
   createFile: projectParams.extend({ path: z.string().min(1).max(4096) }),
   writeFile: projectParams.extend({ path: z.string().min(1).max(4096), content: z.string().max(2 * 1024 * 1024), expectedHash: z.string().length(64) }),
@@ -107,6 +113,14 @@ export class NodalService {
         return this.store.addProject(root, basename(root), repo?.branch, !!repo);
       }
       case 'files': return (await workspace.listFiles(this.store.project(projectId).root)).map(f => f.path);
+      case 'workspaceEntries': return workspace.workspaceEntries(this.store.project(projectId).root);
+      case 'createFolder': return workspace.createFolder(this.store.project(projectId).root, params.path as string);
+      case 'renameFile': return workspace.renameFile(this.store.project(projectId).root, params.path as string, params.newPath as string, params.expectedHash as string);
+      case 'duplicateFile': return workspace.duplicateFile(this.store.project(projectId).root, params.path as string, params.newPath as string, params.expectedHash as string);
+      case 'trashFile': return workspace.trashFile(this.store.project(projectId).root, this.dataDir, projectId, params.path as string, params.expectedHash as string);
+      case 'restoreTrash': return workspace.restoreTrash(this.store.project(projectId).root, this.dataDir, projectId, params.trashId as string);
+      case 'listTrash': return workspace.listTrash(this.store.project(projectId).root, this.dataDir, projectId);
+      case 'searchWorkspace': return workspace.searchWorkspace(this.store.project(projectId).root, params.query as string, { caseSensitive: params.caseSensitive as boolean | undefined, wholeWord: params.wholeWord as boolean | undefined });
       case 'readFile': return workspace.readFile(this.store.project(projectId).root, params.path as string);
       case 'createFile': return workspace.createFile(this.store.project(projectId).root, params.path as string);
       case 'writeFile': {
