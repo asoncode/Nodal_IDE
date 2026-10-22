@@ -14,7 +14,7 @@ export async function restoreLastProject(): Promise<boolean> {
   return getCurrentWindow().label === 'main';
 }
 
-export async function listenDesktopActions(handlers: { openFolder: () => void; save: () => void; canClose: () => boolean; beforeClose?: () => Promise<void>; onError?: (error: unknown) => void }): Promise<UnlistenFn> {
+export async function listenDesktopActions(handlers: { openFolder: () => void; save: () => void; command?: (id: string) => void; canClose: () => boolean; beforeClose?: () => Promise<void>; onError?: (error: unknown) => void }): Promise<UnlistenFn> {
   if (!isDesktop()) return () => {};
   const { getCurrentWindow } = await import('@tauri-apps/api/window');
   const current = getCurrentWindow();
@@ -23,6 +23,7 @@ export async function listenDesktopActions(handlers: { openFolder: () => void; s
   try {
     unlisten.push(await current.listen('nodal:open-folder', handlers.openFolder));
     unlisten.push(await current.listen('nodal:save', handlers.save));
+    if (handlers.command) unlisten.push(await current.listen<string>('nodal:command', event => handlers.command?.(event.payload)));
     unlisten.push(await current.onCloseRequested(async event => {
       if (closing) { event.preventDefault(); return; }
       if (!handlers.canClose()) { event.preventDefault(); return; }

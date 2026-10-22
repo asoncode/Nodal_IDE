@@ -23,6 +23,7 @@ const project = { id: 'project-1', name: 'sample-repo', root: '/tmp/sample-repo'
 let graph: Graph;
 let calls: { method: string; params: Record<string, unknown> }[];
 let generation: Graph;
+let workspaceFiles: string[];
 
 beforeEach(() => {
   vi.mocked(isDesktop).mockReturnValue(false); vi.mocked(pickFolder).mockResolvedValue(null); vi.mocked(restoreLastProject).mockResolvedValue(true); vi.mocked(listenDesktopActions).mockResolvedValue(() => {});
@@ -31,12 +32,18 @@ beforeEach(() => {
   graph.nodes.splice(1, 0, command);
   graph.edges = [{ id: 'a', source: graph.nodes[0].id, target: command.id, kind: 'control' }, { id: 'b', source: command.id, target: graph.nodes[2].id, kind: 'control' }];
   generation = { ...structuredClone(graph), id: 'generated', name: 'Generated plan' };
-  calls = [];
+  calls = []; workspaceFiles = ['src/example.ts'];
   vi.mocked(api).mockImplementation(async <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
     calls.push({ method, params });
     const results: Record<string, unknown> = {
-      bootstrap: { projects: [project], templates: [], providers: [] }, files: params.projectId === 'plain-folder' ? ['notes.txt'] : ['src/example.ts'], listGraphs: params.projectId === 'plain-folder' ? [] : [graph], runs: [],
+      bootstrap: { projects: [project], templates: [], providers: [] }, files: params.projectId === 'plain-folder' ? ['notes.txt'] : workspaceFiles, listGraphs: params.projectId === 'plain-folder' ? [] : [graph], runs: [],
       openProject: { id: 'plain-folder', name: 'plain-folder', root: '/tmp/plain-folder', isGitRepository: false },
+      workspaceEntries: { entries: [...(params.projectId === 'plain-folder' ? ['notes.txt'] : workspaceFiles).map(path => ({ path, kind: 'file' })), ...(params.projectId === 'plain-folder' ? [] : [{ path: 'src', kind: 'directory' }])], truncated: false },
+      listTrash: [], createFolder: { path: params.path, kind: 'directory' },
+      renameFile: { path: params.newPath, content: 'export const answer = 1;', hash: 'a'.repeat(64) },
+      duplicateFile: { path: params.newPath, content: 'export const answer = 1;', hash: 'a'.repeat(64) },
+      trashFile: { trashId: 'deleted-1', path: params.path },
+      searchWorkspace: { matches: [{ path: 'src/example.ts', line: 8, column: 3, preview: 'export const answer = 1;' }], truncated: false },
       createFile: { path: params.path, content: '', hash: 'c'.repeat(64) },
       readFile: { content: 'export const answer = 1;', hash: 'a'.repeat(64) }, writeFile: { content: params.content, hash: 'b'.repeat(64) },
       saveGraph: params.graph, generateGraph: { graph: generation, summary: 'A validated plan.' },
@@ -102,7 +109,7 @@ describe('workspace flows', () => {
 
   it.each([['src/main.cpp', 'cpp'], ['script.py', 'python'], ['README.MD', 'markdown']])('creates %s and opens an empty saved editor with %s syntax', async (path, syntax) => {
     await ready();
-    fireEvent.change(screen.getByLabelText('Search files'), { target: { value: 'missing' } });
+    fireEvent.change(screen.getByLabelText('Filter files'), { target: { value: 'missing' } });
     fireEvent.click(screen.getByRole('button', { name: 'New File' }));
     const input = screen.getByRole('textbox', { name: 'New file path' });
     expect(document.activeElement).toBe(input);
@@ -113,7 +120,7 @@ describe('workspace flows', () => {
     expect(editor.getAttribute('data-language')).toBe(syntax);
     expect(calls.find(call => call.method === 'createFile')?.params).toEqual({ projectId: project.id, path });
     expect(screen.getByRole('button', { name: path })).toBeTruthy();
-    expect(screen.getByLabelText('Search files')).toHaveProperty('value', '');
+    expect(screen.getByLabelText('Filter files')).toHaveProperty('value', '');
     expect(screen.queryByRole('textbox', { name: 'New file path' })).toBeNull();
     fireEvent.change(editor, { target: { value: 'new content' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
@@ -141,15 +148,15 @@ describe('workspace flows', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'New File' }));
     const input = screen.getByRole('textbox', { name: 'New file path' });
-    fireEvent.change(input, { target: { value: 'src/example.ts' } });
+    fireEvent.change(input, { target: { value: 'created-elsewhere.ts' } });
     fireEvent.submit(input.closest('form')!);
     await screen.findByRole('alert');
-    expect(input).toHaveProperty('value', 'src/example.ts');
+    expect(input).toHaveProperty('value', 'created-elsewhere.ts');
     expect(screen.queryByRole('textbox', { name: 'Source editor' })).toBeNull();
     fireEvent.keyDown(input, { key: 'Escape' });
     expect(screen.queryByRole('textbox', { name: 'New file path' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'New File' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel new file' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel file action' }));
     expect(screen.queryByRole('textbox', { name: 'New file path' })).toBeNull();
     expect(vi.mocked(api).mock.calls.filter(([method]) => method === 'createFile')).toHaveLength(1);
   });
@@ -162,7 +169,7 @@ describe('workspace flows', () => {
     const input = screen.getByRole('textbox', { name: 'New file path' });
     fireEvent.change(input, { target: { value: 'src/example.ts' } });
     fireEvent.submit(input.closest('form')!);
-    await screen.findByText('This file is already open. Close it before creating it again.');
+    await screen.findByText('That path already exists or is open in the editor. Choose another path.');
     expect(editor).toHaveProperty('value', 'unsaved code');
     expect(input).toHaveProperty('value', 'src/example.ts');
     expect(calls.some(call => call.method === 'createFile')).toBe(false);
@@ -266,6 +273,127 @@ describe('workspace flows', () => {
     const handlers = vi.mocked(listenDesktopActions).mock.calls[0][0]; expect(handlers.canClose()).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' })); const editor = await screen.findByRole('textbox', { name: 'Source editor' });
     fireEvent.change(editor, { target: { value: 'unsaved code' } }); expect(handlers.canClose()).toBe(false); expect(confirm).toHaveBeenCalledOnce();
+  });
+
+  it('renames an open dirty file while preserving edits and saving against the original disk hash', async () => {
+    await ready(); fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Source editor' }), { target: { value: 'unsaved rename content' } });
+    fireEvent.keyDown(screen.getByRole('button', { name: 'src/example.ts' }), { key: 'F2' });
+    const path = screen.getByRole('textbox', { name: 'Rename file path' });
+    fireEvent.change(path, { target: { value: 'src/renamed.ts' } }); fireEvent.submit(path.closest('form')!);
+    await screen.findByRole('tab', { name: 'renamed.ts' });
+    expect(screen.queryByRole('tab', { name: 'example.ts' })).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Source editor' })).toHaveProperty('value', 'unsaved rename content');
+    expect(calls.find(call => call.method === 'renameFile')?.params).toEqual({ projectId: project.id, path: 'src/example.ts', newPath: 'src/renamed.ts', expectedHash: 'a'.repeat(64) });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls.find(call => call.method === 'writeFile')?.params).toEqual({ projectId: project.id, path: 'src/renamed.ts', content: 'unsaved rename content', expectedHash: 'a'.repeat(64) }));
+  });
+
+  it('keeps an open dirty buffer when deletion is cancelled, and closes it only after confirmed trash succeeds', async () => {
+    await ready(); fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' }));
+    const editor = await screen.findByRole('textbox', { name: 'Source editor' });
+    fireEvent.change(editor, { target: { value: 'unsaved code' } });
+    fireEvent.keyDown(screen.getByRole('button', { name: 'src/example.ts' }), { key: 'Delete' });
+    let dialog = screen.getByRole('dialog', { name: 'Delete file' });
+    expect(dialog.textContent).toContain('Unsaved editor changes will be discarded.');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(calls.some(call => call.method === 'trashFile')).toBe(false);
+    expect(editor).toHaveProperty('value', 'unsaved code');
+    fireEvent.keyDown(screen.getByRole('button', { name: 'src/example.ts' }), { key: 'Delete' });
+    dialog = screen.getByRole('dialog', { name: 'Delete file' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete file' }));
+    await waitFor(() => expect(screen.queryByRole('tab', { name: 'example.ts' })).toBeNull());
+    expect(calls.find(call => call.method === 'trashFile')?.params).toEqual({ projectId: project.id, path: 'src/example.ts', expectedHash: 'a'.repeat(64) });
+    expect(screen.queryByRole('button', { name: 'src/example.ts' })).toBeNull();
+  });
+
+  it('saves all dirty files without saving a graph, guards closing, and reopens a closed editor', async () => {
+    workspaceFiles.push('src/second.ts'); const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Source editor' }), { target: { value: 'first dirty' } });
+    fireEvent.click(screen.getByRole('button', { name: 'src/second.ts' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Source editor' }), { target: { value: 'second dirty' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Close other editors' }));
+    expect(confirm).toHaveBeenCalledWith('Discard unsaved edits in src/example.ts?');
+    expect(screen.getByRole('tab', { name: 'example.ts' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Close all editors' }));
+    expect(confirm).toHaveBeenLastCalledWith('Discard unsaved edits in 2 files?');
+    expect(screen.getByRole('tab', { name: 'second.ts' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save All' }));
+    await waitFor(() => expect(calls.filter(call => call.method === 'writeFile')).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save All' }).hasAttribute('disabled')).toBe(false));
+    expect(calls.filter(call => call.method === 'writeFile').map(call => call.params)).toEqual([
+      { projectId: project.id, path: 'src/example.ts', content: 'first dirty', expectedHash: 'a'.repeat(64) },
+      { projectId: project.id, path: 'src/second.ts', content: 'second dirty', expectedHash: 'a'.repeat(64) },
+    ]);
+    expect(calls.some(call => call.method === 'saveGraph')).toBe(false);
+    confirm.mockClear(); fireEvent.click(screen.getByRole('button', { name: 'Close all editors' }));
+    expect(confirm).not.toHaveBeenCalled(); expect(screen.queryByRole('tab', { name: 'second.ts' })).toBeNull();
+    fireEvent.keyDown(window, { key: 't', ctrlKey: true, shiftKey: true });
+    await screen.findByRole('tab', { name: 'second.ts' });
+  });
+
+  it('stops Save All after a folder switch while the first old-project write is pending', async () => {
+    workspaceFiles.push('src/second.ts'); vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(pickFolder).mockResolvedValue('/tmp/plain-folder'); vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'src/example.ts' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Source editor' }), { target: { value: 'old first' } });
+    fireEvent.click(screen.getByRole('button', { name: 'src/second.ts' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Source editor' }), { target: { value: 'old second' } });
+    const implementation = vi.mocked(api).getMockImplementation()!;
+    let finish!: (value: unknown) => void;
+    vi.mocked(api).mockImplementation((method, params) => {
+      if (method !== 'writeFile') return implementation(method, params);
+      calls.push({ method, params: params ?? {} });
+      return new Promise(resolve => { finish = resolve; });
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save All' }));
+    expect(calls.filter(call => call.method === 'writeFile')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Folder' }));
+    await screen.findByRole('button', { name: 'notes.txt' });
+    await reactAct(async () => finish({ hash: 'b'.repeat(64) }));
+    expect(calls.filter(call => call.method === 'writeFile').map(call => call.params)).toEqual([
+      { projectId: project.id, path: 'src/example.ts', content: 'old first', expectedHash: 'a'.repeat(64) },
+    ]);
+    expect(screen.queryByRole('tab', { name: 'example.ts' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'second.ts' })).toBeNull();
+  });
+
+  it('opens filtered files with Quick Open keyboard selection and runs a command from the palette', async () => {
+    workspaceFiles.push('src/second.ts'); await ready();
+    fireEvent.keyDown(window, { key: 'p', ctrlKey: true });
+    const quickOpen = screen.getByRole('combobox', { name: 'Quick Open' });
+    fireEvent.change(quickOpen, { target: { value: 'second' } }); fireEvent.keyDown(quickOpen, { key: 'Enter' });
+    await screen.findByRole('tab', { name: 'second.ts' });
+    expect(calls.find(call => call.method === 'readFile')?.params).toEqual({ projectId: project.id, path: 'src/second.ts' });
+    expect(screen.queryByRole('dialog', { name: 'Quick Open' })).toBeNull();
+    fireEvent.keyDown(window, { key: 'p', ctrlKey: true, shiftKey: true });
+    const commands = screen.getByRole('combobox', { name: 'Command Palette' });
+    fireEvent.change(commands, { target: { value: 'Find in Files' } }); fireEvent.keyDown(commands, { key: 'Enter' });
+    expect(screen.getByRole('textbox', { name: 'Search repository' })).toBe(document.activeElement);
+    expect(screen.queryByRole('dialog', { name: 'Command Palette' })).toBeNull();
+  });
+
+  it('focuses repository search from its shortcut and opens a saved-file match', async () => {
+    await ready(); fireEvent.keyDown(window, { key: 'f', ctrlKey: true, shiftKey: true });
+    const query = screen.getByRole('textbox', { name: 'Search repository' });
+    expect(query).toBe(document.activeElement);
+    fireEvent.change(query, { target: { value: 'answer' } }); fireEvent.submit(query.closest('form')!);
+    fireEvent.click(await screen.findByRole('button', { name: /src\/example.ts:8/ }));
+    await screen.findByRole('textbox', { name: 'Source editor' });
+    expect(calls.find(call => call.method === 'searchWorkspace')?.params).toEqual({ projectId: project.id, query: 'answer', caseSensitive: false, wholeWord: false });
+    expect(screen.getByRole('tab', { name: 'example.ts' })).toBeTruthy();
+  });
+
+  it('routes optional native command IDs through the latest app actions', async () => {
+    vi.mocked(isDesktop).mockReturnValue(true); await ready();
+    const handlers = vi.mocked(listenDesktopActions).mock.calls[0][0];
+    reactAct(() => handlers.command?.('quick-open'));
+    expect(screen.getByRole('combobox', { name: 'Quick Open' })).toBeTruthy();
+    reactAct(() => handlers.command?.('search'));
+    expect(screen.getByRole('textbox', { name: 'Search repository' })).toBeTruthy();
   });
 
 });

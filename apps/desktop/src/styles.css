@@ -76,7 +76,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .app-shell { height: 100dvh; min-width: 900px; display: grid; grid-template-rows: 35px 1fr 22px; overflow: hidden; }
 .title-bar { display: grid; grid-template-columns: 1fr minmax(240px, 520px) 1fr; align-items: center; gap: 12px; padding: 0 8px; background: var(--bg-side); border-bottom: 1px solid var(--border); }
 .title-left { display: flex; align-items: center; gap: 8px; }
-.brand-mark { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; background: var(--accent); color: #fff; }
+.brand-mark { width: 20px; height: 20px; display: grid; place-items: center; }
 .brand-name { font-size: 12px; color: var(--fg-muted); }
 .command-center { height: 24px; justify-content: center; gap: 8px; border: 1px solid var(--border-strong); background: #222; border-radius: 6px; color: var(--fg-muted); font-size: 12px; }
 .command-center:hover { background: #2a2a2a; border-color: #4a4a4a; }
@@ -233,6 +233,10 @@ textarea { resize: vertical; line-height: 1.5; }
 .badge.attention { background: var(--accent); color: #fff; }
 .panel-status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; padding-right: 8px; font-size: 12px; color: var(--fg-muted); text-transform: capitalize; }
 .panel-content { flex: 1; min-height: 0; overflow: auto; }
+.problem-row { display: flex; gap: 8px; width: 100%; padding: 5px 16px; text-align: left; font-size: 12px; }
+.problem-row:hover { background: var(--bg-hover); }
+.problem-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.problem-row > small { color: var(--fg-muted); }
 .panel-empty { padding: 8px 20px; color: var(--fg-dim); font-size: 12px; }
 .console-output { margin: 0; padding: 6px 20px; font: 12px/1.5 var(--mono); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
 .timeline-row { display: grid; grid-template-columns: 64px 10px minmax(120px, max-content) minmax(80px, 160px) 1fr; gap: 10px; align-items: center; height: 22px; padding: 0 20px; font-size: 12px; }

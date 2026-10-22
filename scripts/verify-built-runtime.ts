@@ -33,7 +33,16 @@ try {
   const file=await api<{path:string;content:string;hash:string}>('createFile',{projectId:project.id,path:'main.cpp'});
   assert.equal(file.content,'');assert.equal(file.path,'main.cpp');
   await api('writeFile',{projectId:project.id,path:file.path,content:'int main() {}',expectedHash:file.hash});
-  const saved=await api<{content:string}>('readFile',{projectId:project.id,path:file.path});assert.equal(saved.content,'int main() {}');
+  const saved=await api<{content:string;hash:string}>('readFile',{projectId:project.id,path:file.path});assert.equal(saved.content,'int main() {}');
+  await api('createFolder',{projectId:project.id,path:'src'});
+  const renamed=await api<{path:string;hash:string}>('renameFile',{projectId:project.id,path:file.path,newPath:'src/main.cpp',expectedHash:saved.hash});
+  assert.equal(renamed.path,'src/main.cpp');
+  const copied=await api<{path:string;hash:string}>('duplicateFile',{projectId:project.id,path:renamed.path,newPath:'src/copy.cpp',expectedHash:renamed.hash});
+  const found=await api<{matches:Array<{path:string;line:number}>}>('searchWorkspace',{projectId:project.id,query:'int main',wholeWord:false});
+  assert(found.matches.some(match=>match.path===renamed.path&&match.line===1));
+  const deleted=await api<{trashId:string}>('trashFile',{projectId:project.id,path:copied.path,expectedHash:copied.hash});
+  const trash=await api<Array<{trashId:string}>>('listTrash',{projectId:project.id});assert(trash.some(item=>item.trashId===deleted.trashId));
+  const restored=await api<{path:string;content:string}>('restoreTrash',{projectId:project.id,trashId:deleted.trashId});assert.equal(restored.content,saved.content);
   const owner={projectId:project.id,ownerId:randomUUID()};
   const terminal=await api<TerminalSession>('createTerminal',{...owner,cols:80,rows:24});
   const scope={...owner,terminalId:terminal.id};
@@ -49,5 +58,5 @@ try {
   assert(output.includes('NODAL_BUNDLE_SHELL_OK'),'Built terminal never returned command output');
   await api('closeTerminals',owner);
   child.stdin.end();assert.equal(await exit,0,stderr);
-  console.log('PASS built runtime imports, SQLite migration, private launch handshake, desktop-origin API, templates, file creation/save, real PTY command/resize/cleanup, and graceful shutdown');
+  console.log('PASS built runtime imports, SQLite migration, private launch handshake, desktop-origin API, templates, file create/save/rename/duplicate/trash/restore/search, real PTY command/resize/cleanup, and graceful shutdown');
 } finally {clearTimeout(timer);if(child.exitCode===null) {child.stdin.end();await exit;}await rm(dir,{recursive:true,force:true});}

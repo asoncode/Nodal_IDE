@@ -33,6 +33,16 @@ describe('native window bridge', () => {
     await expect(listenDesktopActions({ openFolder: vi.fn(), save: vi.fn(), canClose: () => true })).rejects.toThrow('window closed');
     expect(off).toHaveBeenCalledOnce();
   });
+  it('forwards optional native command payloads and unregisters the command listener', async () => {
+    const events = new Map<string, (event: { payload: string }) => void>();
+    const off = [vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    getCurrentWindow.mockReturnValue({ listen: vi.fn(async (name, callback) => { events.set(name, callback); return off[events.size - 1]; }), onCloseRequested: vi.fn(async () => off[3]) });
+    const command = vi.fn();
+    const stop = await listenDesktopActions({ openFolder() {}, save() {}, command, canClose: () => true });
+    events.get('nodal:command')!({ payload: 'quick-open' });
+    expect(command).toHaveBeenCalledWith('quick-open');
+    stop(); off.forEach(unlisten => expect(unlisten).toHaveBeenCalledOnce());
+  });
   it('waits for terminal cleanup before destroying a window and reports cleanup failures', async () => {
     let closing: (event: { preventDefault: () => void }) => Promise<void> = async () => {};
     const destroy = vi.fn(async () => {}); let complete = () => {};

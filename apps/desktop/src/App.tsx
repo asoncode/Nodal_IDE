@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlow, Background, BackgroundVariant, Controls, MiniMap, Handle, Position, applyNodeChanges, applyEdgeChanges, type Node as FlowNode, type Edge as FlowEdge, type Connection, type ReactFlowInstance } from '@xyflow/react';
-import Editor, { DiffEditor } from '@monaco-editor/react';
-import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, FilePlus2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, CirclePlay, Bot, SquareTerminal, GitFork, Split, Merge, Repeat, UserCheck, GitMerge, Flag, CircleX, CircleCheck, type LucideIcon } from 'lucide-react';
+import { DiffEditor } from '@monaco-editor/react';
+import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, CirclePlay, Bot, SquareTerminal, GitFork, Split, Merge, Repeat, UserCheck, GitMerge, Flag, CircleX, CircleCheck, type LucideIcon } from 'lucide-react';
 import { api } from './api.js';
 import ChatPanel from './ChatPanel.js';
+import ExplorerPanel from './ExplorerPanel.js';
+import SearchPanel from './SearchPanel.js';
+import QuickPick from './QuickPick.js';
+import CodeEditor, { readEditorSettings, type CodeEditorHandle, type EditorLocation, type Problem } from './CodeEditor.js';
 import TerminalPanel, { type TerminalPanelHandle } from './TerminalPanel.js';
 import { MessageSquare } from 'lucide-react';
 import { isDesktop, pickFolder, restoreLastProject, listenDesktopActions } from './desktop.js';
@@ -12,30 +16,13 @@ import { GraphSchema } from '../../../packages/shared/src/index.js';
 import { validateGraph } from '../../../packages/core/src/index.js';
 
 type Tab = 'graph' | 'code' | 'diff' | 'replay';
-type View = 'explorer' | 'workflows' | 'runs' | 'providers';
+type View = 'explorer' | 'search' | 'workflows' | 'runs' | 'providers';
 type Diff = { diff: string; branch: string; worktrees: { nodeId: string; path: string; branch: string; diff: string; head: string; sourceHead: string; dirty: boolean }[] };
-type TreeEntry = { name: string; path: string; children?: TreeEntry[] };
 const kinds = Object.keys(NODE_LABELS) as NodeKind[];
 const stringify = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 const activeStates = ['queued', 'running', 'paused', 'waiting_approval'];
 const nodeIcons: Record<NodeKind, LucideIcon> = { start: CirclePlay, agent: Bot, command: SquareTerminal, condition: GitFork, parallel: Split, join: Merge, quality_gate: Repeat, approval: UserCheck, merge: GitMerge, end: Flag };
 const time = (value: string) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-function buildTree(paths: string[]): TreeEntry[] {
-  const root: TreeEntry[] = [];
-  for (const path of paths) {
-    let level = root;
-    const parts = path.split('/');
-    parts.forEach((name, index) => {
-      const folder = index < parts.length - 1;
-      let entry = level.find(item => item.name === name && !!item.children === folder);
-      if (!entry) { entry = { name, path: parts.slice(0, index + 1).join('/'), ...(folder ? { children: [] } : {}) }; level.push(entry); }
-      if (entry.children) level = entry.children;
-    });
-  }
-  const sort = (items: TreeEntry[]): TreeEntry[] => { items.sort((a, b) => Number(!!b.children) - Number(!!a.children) || a.name.localeCompare(b.name)); items.forEach(item => item.children && sort(item.children)); return items; };
-  return sort(root);
-}
 
 function WorkflowNodeView({ data, selected }: { data: { node: GraphNode; status: string }; selected?: boolean }) {
   const { node, status } = data;
@@ -78,24 +65,33 @@ export default function App() {
   const [chatContextRequest, setChatContextRequest] = useState<{ nodeId: string; version: number }>();
   const [sizes, setSizes] = useState({ sidebar: 260, panel: 220, inspector: 300 });
   const [files, setFiles] = useState<string[]>([]);
-  const [fileSearch, setFileSearch] = useState('');
-  const [newFilePath, setNewFilePath] = useState<string>();
-  const [newFileError, setNewFileError] = useState('');
-  const [creatingFile, setCreatingFile] = useState(false);
-  const createFileRequest = useRef<symbol | null>(null);
-  const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
+  const [explorerRequest, setExplorerRequest] = useState<{ action: 'newFile' | 'newFolder' | 'refresh' | 'collapse' | 'reveal'; path?: string; version: number }>();
   const [buffers, setBuffers] = useState<FileBuffer[]>([]);
   const [activeFile, setActiveFile] = useState<string>();
+  const [location, setLocation] = useState<EditorLocation>();
+  const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  const [problems, setProblems] = useState<Record<string, Problem[]>>({});
+  const reportProblems = useCallback((path: string, markers: Problem[]) => setProblems(old => JSON.stringify(old[path]) === JSON.stringify(markers) ? old : { ...old, [path]: markers }), []);
+  const [editorSettings, setEditorSettings] = useState(readEditorSettings);
+  const editorController = useRef<CodeEditorHandle>(null);
+  const shortcutActions = useRef({ saveAll: () => {}, closeActive: () => {}, reopen: () => {} });
+  const nativeCommand = useRef<(id: string) => void>(() => {});
+  const closedFiles = useRef<string[]>([]);
+  const projectGeneration = useRef(0);
+  const fileWrites = useRef(new Map<string, Promise<void>>());
+  const [searchFocus, setSearchFocus] = useState(0);
+  useEffect(() => { try { localStorage.setItem('nodal.editor.settings.v1', JSON.stringify(editorSettings)); } catch { /* Preferences remain usable when storage is unavailable. */ } }, [editorSettings]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [runId, setRunId] = useState<string>();
   const [inspection, setInspection] = useState<Inspection>();
   const [events, setEvents] = useState<Event[]>([]);
   const [diff, setDiff] = useState<Diff>();
   const [busy, setBusy] = useState(false);
+  const [fileOperationPending, setFileOperationPending] = useState(false);
   const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState('Connecting to local runtime…');
   const [error, setError] = useState('');
-  const [dock, setDock] = useState<'events' | 'console' | 'approvals' | 'terminal'>('events');
+  const [dock, setDock] = useState<'events' | 'console' | 'approvals' | 'terminal' | 'problems'>('events');
   const terminalController = useRef<TerminalPanelHandle>(null);
   const [terminalGeneration, setTerminalGeneration] = useState(0);
   const terminalCount = useRef(0);
@@ -106,6 +102,7 @@ export default function App() {
   const [planningProvider, setPlanningProvider] = useState('claude');
   const [generated, setGenerated] = useState<{ graph: Graph; summary: string }>();
   const [paletteQuery, setPaletteQuery] = useState('');
+  const [paletteMode, setPaletteMode] = useState<'nodes' | 'files' | 'commands'>('nodes');
   const [configText, setConfigText] = useState('');
   const [configError, setConfigError] = useState('');
   const [replayIndex, setReplayIndex] = useState(0);
@@ -129,7 +126,6 @@ export default function App() {
   const selectedRun = inspection?.run ?? runs.find(run => run.id === runId);
   const running = !!selectedRun && activeStates.includes(selectedRun.status);
   const approvals = inspection?.approvals.filter(item => !item.decision || item.decision === 'pending') ?? [];
-  const tree = useMemo(() => buildTree(files.slice(0, 5000)), [files]);
 
   const act = useCallback(async (task: () => Promise<void>) => { setBusy(true); setError(''); try { await task(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(false); } }, []);
   const edit = useCallback((update: Graph | ((old: Graph) => Graph)) => {
@@ -170,11 +166,13 @@ export default function App() {
   }, []);
   const loadProject = useCallback(async (selectedProject: Project, discardConfirmed = false) => {
     if (!discardConfirmed && !confirmFolderSwitch()) return false;
-    createFileRequest.current = null; setNewFilePath(undefined); setNewFileError(''); setCreatingFile(false);
+    const generation = ++projectGeneration.current; setExplorerRequest(undefined); setLocation(undefined); setProblems({}); setFileOperationPending(false); closedFiles.current = [];
     const [nextFiles, nextGraphs, nextRuns] = await Promise.all([api<string[]>('files', { projectId: selectedProject.id }), api<Graph[]>('listGraphs', { projectId: selectedProject.id }), api<Run[]>('runs', { projectId: selectedProject.id })]);
+    if (generation !== projectGeneration.current) return false;
     const nextGraph = nextGraphs[0] ?? emptyGraph();
     graphRef.current = nextGraph; graphBaseline.current = JSON.stringify(nextGraph);
-    setProject(selectedProject); setBuffers([]); setActiveFile(undefined); setRunId(undefined); setInspection(undefined); setEvents([]); setDiff(undefined); setOpenFolders({}); setChatContextRequest(undefined);
+    projectRef.current = selectedProject; buffersRef.current = [];
+    setProject(selectedProject); setBuffers([]); setActiveFile(undefined); setRunId(undefined); setInspection(undefined); setEvents([]); setDiff(undefined); setChatContextRequest(undefined);
     setTerminalGeneration(old => old + 1);
     setFiles(nextFiles); setGraphs(nextGraphs); setRuns(nextRuns); setGraph(nextGraph); setSavedGraph(nextGraphs.length ? JSON.stringify(nextGraph) : ''); setUndo([]); setRedo([]); setSelectedId(undefined); setSelectedIds([]); setSelectedEdge(undefined);
     setTab(selectedProject.isGitRepository === false ? 'code' : 'graph');
@@ -222,18 +220,41 @@ export default function App() {
     return () => { disposed = true; window.clearInterval(timer); };
   }, [project]);
 
+  const saveBuffer = useCallback(async (buffer: FileBuffer) => {
+    const currentProject = projectRef.current;
+    if (!currentProject) return;
+    const generation = projectGeneration.current, key = `${generation}:${buffer.path}`;
+    const pending = fileWrites.current.get(key);
+    if (pending) { await pending; return; }
+    const task = (async () => {
+      const result = await api<{ hash: string }>('writeFile', { projectId: currentProject.id, path: buffer.path, content: buffer.content, expectedHash: buffer.hash });
+      if (generation !== projectGeneration.current || projectRef.current?.id !== currentProject.id) return;
+      setBuffers(items => items.map(item => item.path === buffer.path ? { ...item, hash: result.hash, savedContent: buffer.content, external: undefined } : item));
+      setMessage(`Saved ${buffer.path}`);
+    })();
+    fileWrites.current.set(key, task);
+    try { await task; } finally { fileWrites.current.delete(key); }
+  }, []);
+  const saveAll = useCallback(async () => {
+    if (fileOperationPending) return;
+    const generation = projectGeneration.current, projectId = projectRef.current?.id;
+    for (const buffer of buffersRef.current.filter(item => item.content !== item.savedContent)) {
+      if (generation !== projectGeneration.current || projectId !== projectRef.current?.id) return;
+      await saveBuffer(buffer);
+    }
+  }, [saveBuffer, fileOperationPending]);
   const save = useCallback(async () => {
+    if (fileOperationPending) return;
     if (tab === 'code' && !currentBuffer) return;
     if (!project) { setModal('project'); return; }
-    if (tab === 'code' && currentBuffer) {
-      const result = await api<{ content: string; hash: string }>('writeFile', { projectId: project.id, path: currentBuffer.path, content: currentBuffer.content, expectedHash: currentBuffer.hash });
-      setBuffers(items => items.map(buffer => buffer.path === currentBuffer.path ? { ...buffer, hash: result.hash, savedContent: currentBuffer.content, external: undefined } : buffer));
-      setMessage(`Saved ${currentBuffer.path}`);
-    } else {
+    if (tab === 'code' && currentBuffer) await saveBuffer(currentBuffer);
+    else {
+      const generation = projectGeneration.current;
       const saved = await api<Graph>('saveGraph', { projectId: project.id, graph });
+      if (generation !== projectGeneration.current) return;
       graphBaseline.current = JSON.stringify(saved); setGraph(saved); setSavedGraph(JSON.stringify(saved)); setGraphs(await api<Graph[]>('listGraphs', { projectId: project.id })); setMessage(`Saved revision ${saved.revision}`);
     }
-  }, [project, tab, currentBuffer, graph]);
+  }, [project, tab, currentBuffer, graph, saveBuffer, fileOperationPending]);
 
   const openFolderPath = useCallback(async (path: string) => {
     if (!confirmFolderSwitch()) return;
@@ -259,6 +280,7 @@ export default function App() {
     void listenDesktopActions({
       openFolder: () => { if (!disposed) desktopActions.current.openFolder(); },
       save: () => { if (!disposed) desktopActions.current.save(); },
+      command: id => { if (!disposed) nativeCommand.current(id); },
       canClose: () => {
         const unsaved = buffersRef.current.some(buffer => buffer.content !== buffer.savedContent) || JSON.stringify(graphRef.current) !== graphBaseline.current;
         if (terminalCount.current) return window.confirm(`${unsaved ? 'Discard unsaved edits and close' : 'Close'} this window and stop its ${terminalCount.current} running terminal${terminalCount.current === 1 ? '' : 's'}?`);
@@ -276,13 +298,21 @@ export default function App() {
       if (event.ctrlKey && (event.code === 'Backquote' || event.key === '`')) { event.preventDefault(); event.stopPropagation(); setLayout(old => ({ ...old, panel: !(old.panel && dock === 'terminal') })); setDock('terminal'); return; }
       if (element instanceof HTMLElement && element.closest('.xterm')) return;
       const editing = element instanceof HTMLElement && (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) || element.closest('.monaco-editor'));
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 's') { if (!isDesktop()) { event.preventDefault(); shortcutActions.current.saveAll(); } return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { if (!isDesktop()) { event.preventDefault(); void act(save); } return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'o' && !isDesktop()) { event.preventDefault(); openFolder(); return; }
-      if ((event.metaKey || event.ctrlKey) && ['k', 'p'].includes(event.key.toLowerCase())) { event.preventDefault(); setPaletteQuery(''); setModal('palette'); return; }
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'n' && !isDesktop()) { event.preventDefault(); nativeCommand.current('new-file'); return; }
+      if ((event.metaKey || event.ctrlKey) && ['k', 'p'].includes(event.key.toLowerCase())) {
+        if (element instanceof HTMLElement && element.closest('.monaco-editor') && event.key.toLowerCase() === 'k') return;
+        event.preventDefault(); setPaletteQuery(''); setPaletteMode(event.shiftKey ? 'commands' : event.key.toLowerCase() === 'p' ? 'files' : 'nodes'); setModal('palette'); return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'f') { event.preventDefault(); setView('search'); setLayout(old => ({ ...old, sidebar: true })); setSearchFocus(old => old + 1); return; }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 't') { event.preventDefault(); shortcutActions.current.reopen(); return; }
+      if (event.altKey && event.key.toLowerCase() === 'z') { event.preventDefault(); setEditorSettings(old => ({ ...old, wordWrap: !old.wordWrap })); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); setLayout(old => ({ ...old, sidebar: !old.sidebar })); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'j') { event.preventDefault(); setLayout(old => ({ ...old, panel: !old.panel })); return; }
       if (event.key === 'Escape') { setModal(null); setSelectedId(undefined); setSelectedEdge(undefined); }
-      if (editing || tab !== 'graph') return;
+      if (editing || tab !== 'graph' || element instanceof HTMLElement && element.closest('.explorer-panel')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); if (event.shiftKey) redoGraph(); else undoGraph(); }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') clipboard.current = graph.nodes.filter(node => selectedIds.length ? selectedIds.includes(node.id) : node.id === selectedId);
       if ((event.metaKey || event.ctrlKey) && ['v', 'd'].includes(event.key.toLowerCase())) { event.preventDefault(); duplicate(); }
@@ -291,38 +321,34 @@ export default function App() {
     window.addEventListener('keydown', handler, true); return () => window.removeEventListener('keydown', handler, true);
   }, [save, act, tab, graph.nodes, selectedId, selectedIds, duplicate, deleteSelection, undoGraph, redoGraph, openFolder, dock]);
 
-  const openFile = (path: string) => void act(async () => {
-    if (!project) return;
-    if (!buffers.some(buffer => buffer.path === path)) { const file = await api<{ content: string; hash: string }>('readFile', { projectId: project.id, path }); setBuffers(items => [...items, { path, ...file, savedContent: file.content }]); }
-    setActiveFile(path); setTab('code'); setModal(null);
-  });
-  const createFile = async () => {
-    if (!project || newFilePath === undefined || !newFilePath.trim() || createFileRequest.current) return;
-    if (buffersRef.current.some(buffer => buffer.path === newFilePath)) { setNewFileError('This file is already open. Close it before creating it again.'); return; }
-    const request = Symbol();
-    createFileRequest.current = request; setCreatingFile(true); setNewFileError('');
-    try {
-      const file = await api<{ path: string; content: string; hash: string }>('createFile', { projectId: project.id, path: newFilePath });
-      if (createFileRequest.current !== request || projectRef.current?.id !== project.id) return;
-      setFiles(items => [...new Set([...items, file.path])].sort((a, b) => a.localeCompare(b)));
-      setBuffers(items => items.some(buffer => buffer.path === file.path) ? items : [...items, { ...file, savedContent: file.content }]);
-      setOpenFolders(old => {
-        const next = { ...old }, parts = file.path.split('/');
-        for (let index = 1; index < parts.length; index++) next[parts.slice(0, index).join('/')] = true;
-        return next;
-      });
-      setFileSearch(''); setActiveFile(file.path); setTab('code'); setNewFilePath(undefined); setMessage(`Created ${file.path}`);
-    } catch (cause) {
-      if (createFileRequest.current === request) setNewFileError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      if (createFileRequest.current === request) { createFileRequest.current = null; setCreatingFile(false); }
+  const openFile = (path: string, line = 1, column = 1) => void act(async () => {
+    const scope = projectRef.current, generation = projectGeneration.current;
+    if (!scope) return;
+    if (!buffersRef.current.some(buffer => buffer.path === path)) {
+      const file = await api<{ content: string; hash: string }>('readFile', { projectId: scope.id, path });
+      if (projectGeneration.current !== generation || projectRef.current?.id !== scope.id) return;
+      setBuffers(items => items.some(item => item.path === path) ? items : [...items, { path, ...file, savedContent: file.content }]);
     }
+    if (projectGeneration.current !== generation || projectRef.current?.id !== scope.id) return;
+    setActiveFile(path); setTab('code'); setModal(null); setLocation(old => ({ path, line, column, version: (old?.version ?? 0) + 1 }));
+  });
+  const closeEditors = (paths: string[]) => {
+    const closing = buffersRef.current.filter(buffer => paths.includes(buffer.path));
+    if (closing.some(buffer => buffer.content !== buffer.savedContent) && !window.confirm(`Discard unsaved edits in ${closing.length === 1 ? closing[0].path : `${closing.length} files`}?`)) return;
+    closedFiles.current.push(...closing.map(buffer => buffer.path)); closedFiles.current = closedFiles.current.slice(-20);
+    const remaining = buffersRef.current.filter(buffer => !paths.includes(buffer.path)); setBuffers(remaining);
+    if (activeFile && paths.includes(activeFile)) { setActiveFile(remaining.at(-1)?.path); setCursor({ line: 1, column: 1 }); }
   };
-  const closeFile = (buffer: FileBuffer) => {
-    if (buffer.content !== buffer.savedContent && !window.confirm(`Discard unsaved edits to ${buffer.path}?`)) return;
-    const remaining = buffers.filter(item => item.path !== buffer.path);
-    setBuffers(remaining);
-    if (activeFile === buffer.path) { setActiveFile(remaining.at(-1)?.path); if (!remaining.length && tab === 'code') setTab('graph'); }
+  const closeFile = (buffer: FileBuffer) => closeEditors([buffer.path]);
+  shortcutActions.current = { saveAll: () => void act(saveAll), closeActive: () => { if (currentBuffer) closeFile(currentBuffer); }, reopen: () => { const path = closedFiles.current.pop(); if (path) openFile(path); } };
+  const explorerAction = (action: 'newFile' | 'newFolder' | 'refresh' | 'collapse' | 'reveal') => {
+    if (!project) { openFolder(); return; }
+    setView('explorer'); setLayout(old => ({ ...old, sidebar: true }));
+    setExplorerRequest(old => ({ action, path: activeFile, version: (old?.version ?? 0) + 1 }));
+  };
+  const createdFile = (file: { path: string; content: string; hash: string }) => {
+    setBuffers(items => items.some(item => item.path === file.path) ? items : [...items, { ...file, savedContent: file.content }]);
+    setActiveFile(file.path); setTab('code'); setLocation(undefined); setMessage(`Opened ${file.path}`);
   };
   const selectRun = (run: Run) => { setRunId(run.id); setInspection(undefined); setTab('replay'); setMessage(`Recorded run · ${run.id.slice(0, 8)}`); };
   const validation = useMemo(() => validateGraph(graph), [graph]);
@@ -341,23 +367,43 @@ export default function App() {
   const openProjectPath = () => { explicitFolderChoice.current = true; void act(() => openFolderPath(projectPath)); };
   const showView = (next: View) => setLayout(old => { const toggle = old.sidebar && view === next; setView(next); return { ...old, sidebar: !toggle }; });
   const displayedEvents = tab === 'replay' ? events.slice(0, replayIndex) : events;
-  const fileRows = (entries: TreeEntry[], depth: number): React.ReactNode[] => entries.flatMap(entry => {
-    if (entry.children) {
-      const open = openFolders[entry.path] ?? depth === 0;
-      return [<button key={entry.path} className="tree-row" style={{ paddingLeft: 8 + depth * 12 }} aria-expanded={open} onClick={() => setOpenFolders(old => ({ ...old, [entry.path]: !open }))}>{open ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{entry.name}</span></button>, ...(open ? fileRows(entry.children, depth + 1) : [])];
-    }
-    return [<button key={entry.path} title={entry.path} aria-label={entry.path} className={`tree-row file ${tab === 'code' && activeFile === entry.path ? 'active' : ''}`} style={{ paddingLeft: 22 + depth * 12 }} onClick={() => openFile(entry.path)}><FileCode2 size={14}/><span>{entry.name}</span>{buffers.some(buffer => buffer.path === entry.path && buffer.content !== buffer.savedContent) && <span className="dirty-dot"/>}</button>];
-  });
-  const paletteKinds = kinds.filter(kind => NODE_LABELS[kind].toLowerCase().includes(paletteQuery.toLowerCase()));
-  const paletteFiles = paletteQuery ? files.filter(path => path.toLowerCase().includes(paletteQuery.toLowerCase())).slice(0, 8) : [];
+  const editorCommands = [
+    { id: 'open', label: 'File: Open Folder', run: openFolder },
+    { id: 'new-file', label: 'File: New File', run: () => explorerAction('newFile') },
+    { id: 'new-folder', label: 'File: New Folder', run: () => explorerAction('newFolder') },
+    { id: 'save-all', label: 'File: Save All', shortcut: 'Cmd/Ctrl+Shift+S', run: () => void act(saveAll) },
+    { id: 'close-others', label: 'File: Close Other Editors', run: () => closeEditors(buffers.filter(buffer => buffer.path !== activeFile).map(buffer => buffer.path)) },
+    { id: 'close-all', label: 'File: Close All Editors', run: () => closeEditors(buffers.map(buffer => buffer.path)) },
+    { id: 'reopen', label: 'File: Reopen Closed Editor', shortcut: 'Cmd/Ctrl+Shift+T', run: shortcutActions.current.reopen },
+    { id: 'search', label: 'Search: Find in Files', shortcut: 'Cmd/Ctrl+Shift+F', run: () => { setView('search'); setLayout(old => ({ ...old, sidebar: true })); setSearchFocus(old => old + 1); } },
+    { id: 'refresh', label: 'Explorer: Refresh', run: () => explorerAction('refresh') },
+    { id: 'collapse', label: 'Explorer: Collapse All', run: () => explorerAction('collapse') },
+    { id: 'reveal', label: 'Explorer: Reveal Active File', run: () => explorerAction('reveal') },
+    { id: 'wrap', label: 'Editor: Toggle Word Wrap', shortcut: 'Alt+Z', run: () => setEditorSettings(old => ({ ...old, wordWrap: !old.wordWrap })) },
+    { id: 'format', label: 'Editor: Format Document', run: () => editorController.current?.run('editor.action.formatDocument') },
+    { id: 'find', label: 'Editor: Find', run: () => editorController.current?.run('actions.find') },
+    { id: 'replace', label: 'Editor: Replace', run: () => editorController.current?.run('editor.action.startFindReplaceAction') },
+    { id: 'goto', label: 'Editor: Go to Line', run: () => editorController.current?.run('editor.action.gotoLine') },
+    { id: 'comment', label: 'Editor: Toggle Line Comment', run: () => editorController.current?.run('editor.action.commentLine') },
+    { id: 'fold', label: 'Editor: Fold All', run: () => editorController.current?.run('editor.foldAll') },
+    { id: 'unfold', label: 'Editor: Unfold All', run: () => editorController.current?.run('editor.unfoldAll') },
+    { id: 'terminal', label: 'View: Toggle Terminal', shortcut: 'Ctrl+`', run: () => { setDock('terminal'); setLayout(old => ({ ...old, panel: !(old.panel && dock === 'terminal') })); } },
+    { id: 'problems', label: 'View: Problems', run: () => { setDock('problems'); setLayout(old => ({ ...old, panel: true })); } },
+  ].filter(command => !['format', 'find', 'replace', 'goto', 'comment', 'fold', 'unfold'].includes(command.id) || tab === 'code' && !!currentBuffer);
+  const paletteItems = paletteMode === 'commands' ? editorCommands.filter(command => command.label.toLowerCase().includes(paletteQuery.toLowerCase())) : paletteMode === 'files' ? files.filter(path => path.toLowerCase().includes(paletteQuery.toLowerCase())).slice(0, 100).map(path => ({ id: path, label: path.split('/').at(-1)!, detail: path })) : kinds.filter(kind => NODE_LABELS[kind].toLowerCase().includes(paletteQuery.toLowerCase())).map(kind => ({ id: kind, label: NODE_LABELS[kind] }));
+  nativeCommand.current = id => {
+    if (id === 'quick-open' || id === 'commands') { setPaletteQuery(''); setPaletteMode(id === 'quick-open' ? 'files' : 'commands'); setModal('palette'); }
+    else editorCommands.find(command => command.id === id)?.run();
+  };
+  const problemItems = buffers.flatMap(buffer => (problems[buffer.path] ?? []).map(problem => ({ ...problem, path: buffer.path })));
 
   return <div className="app-shell">
     <header className="title-bar">
-      <div className="title-left"><span className="brand-mark" aria-hidden="true"><Workflow size={14}/></span><span className="brand-name">Nodal</span></div>
-      <button className="command-center" onClick={() => { setPaletteQuery(''); setModal('palette'); }}><Search size={13}/><span>{project?.name ?? 'Nodal'}</span><kbd>⌘K</kbd></button>
+      <div className="title-left"><span className="brand-mark" aria-hidden="true"><img src="/nodal.svg" alt="" width="20" height="20"/></span><span className="brand-name">Nodal</span></div>
+      <button className="command-center" onClick={() => { setPaletteQuery(''); setPaletteMode('commands'); setModal('palette'); }}><Search size={13}/><span>{project?.name ?? 'Nodal'}</span><kbd>⌘⇧P</kbd></button>
       <div className="command-actions">
         <IconButton title="Validate" onClick={() => { setMessage(validation.valid ? 'Graph is valid. All paths and execution bounds checked.' : ''); setError(validation.valid ? '' : validation.errors.map(issue => issue.message).join(' · ')); }}><ShieldCheck size={15}/></IconButton>
-        <IconButton title="Save" disabled={busy} onClick={() => void act(save)}><Save size={15}/></IconButton>
+        <IconButton title="Save" disabled={busy || fileOperationPending} onClick={() => void act(save)}><Save size={15}/></IconButton>
         <IconButton title="Generate" onClick={() => { setGenerated(undefined); setModal('generate'); }}><Sparkles size={15}/></IconButton>
         <span className="divider"/>
         <IconButton title={inspection?.run.status === 'paused' ? 'Resume run' : 'Pause run'} disabled={!running || busy} onClick={() => void act(async () => { await api(inspection?.run.status === 'paused' ? 'resume' : 'pause', { runId }); })}><Pause size={15}/></IconButton>
@@ -378,24 +424,20 @@ export default function App() {
         <button className={chatOpen ? 'active' : ''} title="Agent chat" aria-label="Agent chat" onClick={() => setChatOpen(old => !old)}><MessageSquare size={22} strokeWidth={1.5}/></button>
       </nav>
 
-      {layout.sidebar && <>
-        <aside className="sidebar" style={{ width: sizes.sidebar }}>
-          {view === 'explorer' && <>
-            <div className="view-title"><span>Explorer</span><div className="explorer-actions"><IconButton title="New File" disabled={!project || busy || creatingFile} onClick={() => { setNewFilePath(''); setNewFileError(''); }}><FilePlus2 size={15}/></IconButton><IconButton title="Open Folder" onClick={openFolder}><FolderOpen size={15}/></IconButton></div></div>
-            <div className="section-header"><ChevronDown size={14}/><span>{project?.name ?? 'No folder open'}</span>{project?.branch && <small><GitBranch size={11}/>{project.branch}</small>}</div>
-            {files.length > 0 && <label className="filter-input"><Search size={12}/><input aria-label="Search files" placeholder="Filter files" value={fileSearch} onChange={event => setFileSearch(event.target.value)}/></label>}
-            {newFilePath !== undefined && <form className="new-file-form" onSubmit={event => { event.preventDefault(); void createFile(); }}>
-              <div className="new-file-input"><FilePlus2 size={14}/><input autoFocus aria-label="New file path" aria-describedby={newFileError ? 'new-file-error' : undefined} aria-invalid={!!newFileError} placeholder="filename.py or src/main.cpp" value={newFilePath} disabled={creatingFile} onChange={event => { setNewFilePath(event.target.value); setNewFileError(''); }} onKeyDown={event => {
-                if (event.nativeEvent.isComposing) { if (event.key === 'Enter') event.preventDefault(); return; }
-                if (event.key === 'Escape' && !creatingFile) { event.preventDefault(); setNewFilePath(undefined); setNewFileError(''); }
-              }}/><button type="button" className="icon-button" title="Cancel new file" aria-label="Cancel new file" disabled={creatingFile} onClick={() => { setNewFilePath(undefined); setNewFileError(''); }}><X size={14}/></button></div>
-              {newFileError && <p id="new-file-error" className="inline-error" role="alert">{newFileError}</p>}
-            </form>}
-            <div className="file-list">
-              {fileSearch ? files.filter(path => path.toLowerCase().includes(fileSearch.toLowerCase())).slice(0, 500).map(path => <button key={path} title={path} aria-label={path} className={`tree-row file ${tab === 'code' && activeFile === path ? 'active' : ''}`} onClick={() => openFile(path)}><FileCode2 size={14}/><span>{path}</span></button>) : fileRows(tree, 0)}
-              {!files.length && <div className="sidebar-empty"><p>{project ? 'This folder has no files to show.' : 'Open a folder to browse and edit its files.'}</p><button className="primary block" onClick={openFolder}>Open Folder</button></div>}
-            </div>
-          </>}
+      {<>
+        <aside className="sidebar" style={{ width: sizes.sidebar, display: layout.sidebar ? 'flex' : 'none' }}>
+          <div style={{ display: view === 'explorer' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}>
+            <ExplorerPanel key={`${project?.id}:${terminalGeneration}`} project={project} files={files} buffers={buffers} activeFile={activeFile} busy={busy} actionRequest={explorerRequest} onPendingChange={setFileOperationPending} onOpenFolder={openFolder} onOpenFile={openFile} onFilesChange={setFiles} onCreated={createdFile}
+              onRenamed={(oldPath, file) => {
+                setBuffers(items => items.map(buffer => buffer.path === oldPath ? { ...buffer, path: file.path } : buffer));
+                setActiveFile(old => old === oldPath ? file.path : old); setProblems(old => { const next = { ...old }; delete next[oldPath]; return next; });
+                setMessage(`Renamed ${oldPath} to ${file.path}`);
+              }} onDeleted={path => {
+                setBuffers(items => items.filter(buffer => buffer.path !== path));
+                setActiveFile(old => old === path ? buffersRef.current.filter(buffer => buffer.path !== path).at(-1)?.path : old); setProblems(old => { const next = { ...old }; delete next[path]; return next; }); setMessage(`Moved ${path} to Nodal Trash`);
+              }}/>
+          </div>
+          <div style={{ display: view === 'search' ? 'flex' : 'none', flex: 1, minHeight: 0, flexDirection: 'column' }}><SearchPanel project={project} onOpen={openFile} focusVersion={searchFocus}/></div>
           {view === 'workflows' && <>
             <div className="view-title"><span>Workflows</span><IconButton title="New workflow" onClick={() => { edit(emptyGraph()); setSelectedId(undefined); setTab('graph'); }}><Plus size={15}/></IconButton></div>
             <div className="sidebar-scroll">
@@ -421,7 +463,7 @@ export default function App() {
             </div>
           </>}
         </aside>
-        <div className="sash vertical" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" onPointerDown={resize('sidebar', 'x', 1)}/>
+        <div className="sash vertical" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" style={{ display: layout.sidebar ? undefined : 'none' }} onPointerDown={resize('sidebar', 'x', 1)}/>
       </>}
 
       <main className="main-column">
@@ -439,8 +481,9 @@ export default function App() {
                 <IconButton title="Redo" disabled={!redo.length} onClick={redoGraph}><Redo2 size={15}/></IconButton>
                 <IconButton title="Import graph JSON" onClick={() => importInput.current?.click()}><Upload size={15}/></IconButton>
                 <IconButton title="Export graph JSON" onClick={exportGraph}><Download size={15}/></IconButton>
-                <IconButton title="Add node" onClick={() => { setPaletteQuery(''); setModal('palette'); }}><Plus size={16}/></IconButton>
+                <IconButton title="Add node" onClick={() => { setPaletteQuery(''); setPaletteMode('nodes'); setModal('palette'); }}><Plus size={16}/></IconButton>
               </>}
+              {tab === 'code' && currentBuffer && <><IconButton title="Save All" disabled={busy || fileOperationPending} onClick={() => void act(saveAll)}><Save size={14}/></IconButton><IconButton title="Close other editors" onClick={() => closeEditors(buffers.filter(buffer => buffer.path !== activeFile).map(buffer => buffer.path))}><Files size={14}/></IconButton><IconButton title="Close all editors" onClick={() => closeEditors(buffers.map(buffer => buffer.path))}><X size={14}/></IconButton></>}
               {tab === 'diff' && <IconButton title="Refresh changes" onClick={refreshDiff}><RefreshCw size={14}/></IconButton>}
               {tab === 'replay' && runId && <button className="text-action" disabled={busy || running} onClick={() => void act(async () => { const next = await api<Run>('rerun', { runId, confirmed: true }); setRuns(items => [next, ...items]); setRunId(next.id); setMessage('Created a new run from the recorded workflow.'); })}><Play size={12}/>Re-run as new run</button>}
             </div>
@@ -462,9 +505,12 @@ export default function App() {
               </ReactFlow>
             </div>}
             {tab === 'code' && !currentBuffer && <div className="folder-welcome"><FolderOpen size={32}/><h2>{project?.name ?? 'Open a folder'}</h2><p>{project ? 'Select a file in Explorer to start editing.' : 'Open a folder to browse and edit its files.'}</p>{!project && <button className="primary" onClick={openFolder}>Open Folder</button>}</div>}
-            {tab === 'code' && currentBuffer && <div className="code-pane">
+            {currentBuffer && <div className="code-pane" style={{ display: tab === 'code' ? 'flex' : 'none' }}>
               {currentBuffer.external && <div className="info-bar">File changed on disk. Your edits are preserved.<button onClick={() => setTab('diff')}>Compare</button><button onClick={() => setBuffers(items => items.map(buffer => buffer.path === currentBuffer.path && buffer.external ? { ...buffer, content: buffer.external.content, savedContent: buffer.external.content, hash: buffer.external.hash, external: undefined } : buffer))}>Reload from disk</button></div>}
-              <Editor path={currentBuffer.path} language={language(currentBuffer.path)} value={currentBuffer.content} theme="vs-dark" onChange={value => setBuffers(items => items.map(buffer => buffer.path === activeFile ? { ...buffer, content: value ?? '' } : buffer))} options={{ editContext: false, fontSize: 13, lineHeight: 20, fontFamily: "'SF Mono', Menlo, Consolas, monospace", minimap: { enabled: false }, padding: { top: 8 }, scrollBeyondLastLine: false, automaticLayout: true, renderLineHighlight: 'line' }}/>
+              <CodeEditor key={project?.id} ref={editorController} projectId={project?.id ?? ''} buffer={currentBuffer} openPaths={buffers.map(buffer => buffer.path)} location={location} settings={editorSettings} readOnly={fileOperationPending} visible={tab === 'code'} onSettings={setEditorSettings}
+                onChange={content => setBuffers(items => items.map(buffer => buffer.path === currentBuffer.path ? { ...buffer, content } : buffer))}
+                onCursor={(line, column) => setCursor({ line, column })} onProblems={reportProblems} onError={setError}/>
+
             </div>}
             {tab === 'diff' && <div className="scroll-pane">
               {currentBuffer?.external ? <><div className="info-bar">Disk version → your unsaved buffer. Reload from the editor to discard your edits.</div><DiffEditor original={currentBuffer.external.content} modified={currentBuffer.content} language={language(currentBuffer.path)} theme="vs-dark" options={{ readOnly: true, minimap: { enabled: false }, automaticLayout: true }}/></> : <>
@@ -488,13 +534,15 @@ export default function App() {
             <nav className="panel-tabs">
               <button className={dock === 'events' ? 'selected' : ''} onClick={() => setDock('events')}>Timeline{events.length > 0 && <span className="badge">{events.length}</span>}</button>
               <button className={dock === 'console' ? 'selected' : ''} onClick={() => setDock('console')}>Console</button>
+              <button className={dock === 'problems' ? 'selected' : ''} onClick={() => setDock('problems')}>Problems{problemItems.length > 0 && <span className="badge">{problemItems.length}</span>}</button>
               <button className={dock === 'terminal' ? 'selected' : ''} title="Terminal (Ctrl+`)" onClick={() => setDock('terminal')}>Terminal</button>
               <button className={dock === 'approvals' ? 'selected' : ''} onClick={() => setDock('approvals')}>Approvals{approvals.length > 0 && <span className="badge attention">{approvals.length}</span>}</button>
               <span className="panel-status"><span className={`state-dot ${inspection?.run.status ?? 'pending'}`}/>{inspection?.run.status.replaceAll('_', ' ') ?? 'No active run'}</span>
               <IconButton title="Close panel" onClick={() => setLayout(old => ({ ...old, panel: false }))}><X size={14}/></IconButton>
             </nav>
             <div className="panel-content" hidden={dock === 'terminal'}>
-              {dock === 'approvals' ? approvals.length ? approvals.map(approval => <div key={approval.id} className="approval-item"><ShieldCheck size={16}/><div><strong>{graph.nodes.find(node => node.id === approval.nodeId)?.label ?? approval.nodeId}</strong><p>{approval.message ?? 'Review this node before continuing.'}</p><code>{stringify(approval.scope ?? {})}</code></div><button className="secondary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: false }); })}>Reject</button><button className="primary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: true }); })}>Approve</button></div>) : <p className="panel-empty">No pending approvals. Requests appear here when a run needs your decision.</p>
+              {dock === 'problems' ? problemItems.length ? problemItems.map((problem, index) => <button key={`${problem.path}:${index}`} className="problem-row" onClick={() => openFile(problem.path, problem.startLineNumber, problem.startColumn)}><CircleX size={13}/><span>{problem.message}</span><small>{problem.path}:{problem.startLineNumber}:{problem.startColumn}</small></button>) : <p className="panel-empty">No diagnostics reported for open editors. Language checks depend on Monaco support; external language servers are not connected.</p>
+                : dock === 'approvals' ? approvals.length ? approvals.map(approval => <div key={approval.id} className="approval-item"><ShieldCheck size={16}/><div><strong>{graph.nodes.find(node => node.id === approval.nodeId)?.label ?? approval.nodeId}</strong><p>{approval.message ?? 'Review this node before continuing.'}</p><code>{stringify(approval.scope ?? {})}</code></div><button className="secondary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: false }); })}>Reject</button><button className="primary" disabled={busy} onClick={() => void act(async () => { await api('approve', { runId, nodeId: approval.nodeId, approved: true }); })}>Approve</button></div>) : <p className="panel-empty">No pending approvals. Requests appear here when a run needs your decision.</p>
                 : dock === 'console' ? <pre className="console-output">{events.filter(event => (!selectedId || event.nodeId === selectedId) && /output|stream|log|tool|error|failed/.test(event.kind)).map(event => `${time(event.timestamp)}  ${event.kind}\n${stringify(event.payload)}`).join('\n\n') || (selectedId ? 'No output recorded for the selected node.' : 'Command output and provider events appear here. Select a node to filter.')}</pre>
                 : events.length ? [...events].reverse().slice(0, 150).map(event => <div className="timeline-row" key={event.eventId}><time>{time(event.timestamp)}</time><span className={`state-dot ${event.kind.includes('fail') ? 'failed' : event.kind.includes('approval') ? 'waiting_approval' : 'succeeded'}`}/><strong>{event.kind}</strong><span>{event.nodeId ? graph.nodes.find(node => node.id === event.nodeId)?.label ?? event.nodeId : 'Workflow'}</span><code>{stringify(event.payload)}</code></div>) : <p className="panel-empty">Run a workflow to see live events. Commands and provider actions are recorded as they happen.</p>}
             </div>
@@ -553,12 +601,12 @@ export default function App() {
         {approvals.length > 0 && <button className="status-item" onClick={() => { setDock('approvals'); setLayout(old => ({ ...old, panel: true })); }}><ShieldCheck size={12}/>{approvals.length} awaiting approval</button>}
         <span className="status-item status-message">{busy ? 'Working…' : message}</span>
       </div>
-      <div><span className="status-item">Usage: unavailable</span><span className="status-item">Local workspace</span></div>
+      <div>{tab === 'code' && currentBuffer && <><span className="status-item">Ln {cursor.line}, Col {cursor.column}</span><span className="status-item">{language(currentBuffer.path)} · UTF-8</span></>}<span className="status-item">Usage: unavailable</span><span className="status-item">Local workspace</span></div>
     </footer>
 
     {error && !modal && <div className="notification" role="alert"><CircleX size={15}/><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><X size={14}/></button></div>}
     <input ref={importInput} type="file" accept="application/json,.json" hidden onChange={event => { const file = event.target.files?.[0]; if (file) void act(async () => { const imported = GraphSchema.parse(JSON.parse(await file.text())); edit(imported); setTab('graph'); setMessage('Imported workflow as a draft.'); }); event.target.value = ''; }}/>
-    {modal && <div className={`modal-backdrop ${modal === 'palette' ? 'top' : ''}`} onMouseDown={event => { if (event.target === event.currentTarget) setModal(null); }}><section className={`modal ${modal === 'palette' ? 'quick-input' : ''}`} role="dialog" aria-modal="true" aria-label={modal === 'project' ? 'Open Folder' : modal === 'generate' ? 'Generate workflow' : 'Add a node'}>
+    {modal && <div className={`modal-backdrop ${modal === 'palette' ? 'top' : ''}`} onMouseDown={event => { if (event.target === event.currentTarget) setModal(null); }}><section className={`modal ${modal === 'palette' ? 'quick-input' : ''}`} role="dialog" aria-modal="true" aria-label={modal === 'project' ? 'Open Folder' : modal === 'generate' ? 'Generate workflow' : paletteMode === 'files' ? 'Quick Open' : paletteMode === 'commands' ? 'Command Palette' : 'Add a node'}>
       {modal !== 'palette' && <div className="modal-header"><h2>{modal === 'project' ? 'Open Folder' : 'Generate workflow'}</h2><IconButton title="Close dialog" onClick={() => setModal(null)}><X size={15}/></IconButton></div>}
       {modal === 'project' && <div className="modal-body">
         <p>Choose any folder to browse and edit. Agent workflows require a Git repository with an initial commit.</p>
@@ -575,16 +623,12 @@ export default function App() {
         <div className="dialog-actions"><button className="secondary" disabled={busy || !project || !prompt.trim()} onClick={() => void act(async () => { if (!project) return; const result = await api<{ graph: Graph; summary: string }>('generateGraph', { projectId: project.id, graph, prompt, provider: planningProvider }); const parsed = GraphSchema.parse(result.graph); const check = validateGraph(parsed); if (!check.valid) throw new Error(check.errors.map(issue => issue.message).join(' · ')); setGenerated({ ...result, graph: parsed }); })}>{busy ? 'Generating…' : generated ? 'Generate again' : 'Generate preview'}</button><button className="primary" disabled={!generated || busy} onClick={() => { if (generated) { edit(generated.graph); setSelectedId(undefined); setTab('graph'); setModal(null); setMessage('Applied generated workflow as a draft. Review permissions before running.'); } }}>Apply to canvas</button></div>
         {!project && <p className="inline-error">Open a repository before generating a graph.</p>}
       </div>}
-      {modal === 'palette' && <>
-        <label className="palette-search"><input autoFocus aria-label="Search nodes and files" placeholder="Add a node or open a file" value={paletteQuery} onChange={event => setPaletteQuery(event.target.value)}/></label>
-        <div className="palette-options">
-          {paletteKinds.length > 0 && <div className="palette-group">Add node</div>}
-          {paletteKinds.map(kind => { const Icon = nodeIcons[kind]; return <button draggable onDragStart={event => { event.dataTransfer.setData('application/nodal-node', kind); setModal(null); }} key={kind} onClick={() => addNode(kind)}><Icon size={14}/><span>{NODE_LABELS[kind]}</span></button>; })}
-          {paletteFiles.length > 0 && <div className="palette-group">Files</div>}
-          {paletteFiles.map(path => <button key={path} onClick={() => openFile(path)}><FileCode2 size={14}/><span>{path.split('/').at(-1)}</span><small>{path}</small></button>)}
-          {!paletteKinds.length && !paletteFiles.length && <p className="panel-empty">No matching nodes or files.</p>}
-        </div>
-      </>}
+      {modal === 'palette' && <QuickPick key={paletteMode} label={paletteMode === 'files' ? 'Quick Open' : paletteMode === 'commands' ? 'Command Palette' : 'Search nodes and files'} placeholder={paletteMode === 'files' ? 'Search files by name or path' : paletteMode === 'commands' ? 'Type a command' : 'Add a workflow node'} query={paletteQuery} onQueryChange={setPaletteQuery} items={paletteItems} onClose={() => setModal(null)} onChoose={id => {
+        setModal(null);
+        if (paletteMode === 'files') openFile(id);
+        else if (paletteMode === 'nodes') addNode(id as NodeKind);
+        else editorCommands.find(command => command.id === id)?.run();
+      }}/>}
       {error && <div className="inline-error" role="alert">{error}</div>}
     </section></div>}
   </div>;

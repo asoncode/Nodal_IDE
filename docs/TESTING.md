@@ -2,7 +2,7 @@
 
 ## Automated checks
 
-`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 154 unit/integration/UI cases.
+`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 207 unit/integration/UI cases.
 
 Coverage includes deterministic predicate evaluation, graph validation and templates, topological readiness, skipped branches, parallel concurrency, all join policies, retry readiness races, bounded loops with feedback evidence, iteration limits, cancellation during delayed retries, pause/resume boundaries, node/run timeout, approvals, journal failures, and interruption recovery.
 
@@ -53,3 +53,11 @@ Terminal tests exercise real PTYs and mocked xterm rendering: project/window own
 Browser E2E runs commands in the opened folder through a real PTY, checks output and workspace width, interrupts a foreground process with Ctrl+C, switches between two terminal tabs, hides/reopens the panel using Ctrl+backquote, and stops both sessions with trash. It captures `docs/screenshots/terminal.png` and uses no provider requests. Real PTY integration tests also cover foreground/background process cleanup, output retention, resize, normal lease expiry, and preserving jobs across machine sleep.
 
 Native staging loads the staged `node-pty` module with the bundled Node executable and opens, resizes, and closes a shell; packaging fails if that check fails. Manually verify the packaged macOS app's Terminal tab and Ctrl+backquote shortcut, input focus, Ctrl+C, and window-close cleanup. Windows/Linux PTY packaging and native interaction remain unverified.
+
+## Everyday IDE checks
+
+Explorer tests use real temporary files for no-clobber rename and duplicate, stale hashes, linked paths, occupied restore destinations, preserved executable permissions, recoverable trash across restarts, and concurrent source removal during rename. Search tests verify literal Unicode text, case/whole-word behavior, sensitive-path exclusions, empty directories, and entry/byte/match bounds.
+
+UI checks cover dirty-buffer rename, confirmation and recovery for deletion, pending-operation editor protection, late responses after project switches, versioned Explorer commands, keyboard/IME-safe quick pickers, saved preferences, supported Monaco actions, diagnostics, and cursor navigation. A model-aware Monaco mock reproduces the wrapper's same-content path-switch behavior and verifies discarded text cannot return after closing/reopening an editor. Save All has a delayed-first-write/folder-switch regression that prevents old buffers being written to a new project.
+
+Browser E2E exercises actual rename, duplicate, delete, restore, folder creation, content search, file/command navigation, preferences, Find, JSON formatting and saving, and reopening a discarded editor with the same saved text as another tab. The existing workflow, approval, chat attachment, and real PTY checks remain in the same flow.

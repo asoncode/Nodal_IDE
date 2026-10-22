@@ -45,15 +45,36 @@ In the desktop app, choose **File → Open Folder…**, then select a folder. Cl
 
 To create a file, click **New File** in the Explorer header, enter a name such as `script.py`, `main.cpp`, or `notes.md`, and press **Enter**. Nodal creates the empty file and opens it in the editor, choosing syntax highlighting from its extension. You can also enter a path such as `src/main.cpp` inside an existing folder. Existing files are never overwritten; press **Escape** to cancel.
 
+Use **New Folder** to create an empty folder. Select a folder first to create the next file or folder inside it; click the project name to return to the root. The **…** button on each file offers **Rename file**, **Duplicate saved file**, **Delete file**, and copy-path actions. **F2** and **Delete** work when a file row has focus. Rename preserves unsaved editor text. Duplicate copies the saved version on disk.
+
+Deletion moves the saved file into Nodal's own project-scoped trash after confirmation. Click **Deleted files** beside the Explorer filter to restore it, including after restarting the app. Restore refuses to overwrite an existing path. File operations support ordinary text files up to 2 MiB; recursive folder deletion and folder rename are not included.
+
 | Action | macOS | Windows / Linux shortcut |
 | --- | --- | --- |
 | Open folder | `⌘O` | `Ctrl+O` |
 | Save | `⌘S` | `Ctrl+S` |
 | New window | `⌘⇧N` | `Ctrl+Shift+N` |
+| New file | `⌘N` | `Ctrl+N` |
+| Save all open files | `⌘⇧S` | `Ctrl+Shift+S` |
+| Quick Open | `⌘P` | `Ctrl+P` |
+| Command Palette | `⌘⇧P` | `Ctrl+Shift+P` |
+| Find in files | `⌘⇧F` | `Ctrl+Shift+F` |
+| Reopen closed editor | `⌘⇧T` | `Ctrl+Shift+T` |
+| Toggle word wrap | `Option+Z` | `Alt+Z` |
 
 Each new window starts with an empty workspace and has its own folder and editor tabs. Nodal asks before discarding unsaved file or workflow edits when you switch folders or close a window. In browser mode, the Explorer folder button lets you enter a full local path.
 
 File saves check whether the file has changed on disk since you opened it. If another editor changes it, Nodal lets you compare the versions rather than silently overwriting the changes.
+
+## Find and edit code
+
+Use **Search** in the activity bar to find literal text across saved project files. Match-case and whole-word controls narrow the results; click a match to open its file at that line. Searches skip binary files, linked paths, generated folders, and credential-like filenames, with limits on scanned files, bytes, and matches. Unsaved buffers are not searched.
+
+**Quick Open** finds files by name or path. The **Command Palette** exposes workspace actions and editing commands; use arrow keys and Enter to select one. **Cmd/Ctrl+K** still opens the workflow node picker when the code editor does not have focus.
+
+The editor toolbar provides Find, Replace, Format, Go to Line, word wrap, and preferences for font size, indentation, and the minimap. Preferences are saved on this computer. Monaco also supplies multiple cursors, line comments, folding, and standard editing shortcuts. Formatting and diagnostics depend on its bundled language support; Nodal does not yet connect external language servers. The **Problems** tab lists diagnostics reported for open editors and lets you jump to the relevant line.
+
+Use **Save All**, **Close other editors**, or **Close all editors** from the editor toolbar or Command Palette. Closing dirty editors asks before discarding changes. Manual file saves remain the default; unsaved text and terminal sessions are not restored after quitting. See the [IDE feature comparison](docs/IDE_FEATURES.md) for the implemented baseline and remaining work.
 
 ## Use the terminal
 

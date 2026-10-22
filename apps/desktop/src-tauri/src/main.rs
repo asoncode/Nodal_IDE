@@ -44,12 +44,26 @@ fn native_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         }
     };
     file_menu.prepend_items(&[
+        &MenuItem::with_id(app, "new-file", "New File", true, Some("CmdOrCtrl+N"))?,
+        &MenuItem::with_id(app, "new-folder", "New Folder", true, None::<&str>)?,
         &MenuItem::with_id(app, "new-window", "New Window", true, Some("CmdOrCtrl+Shift+N"))?,
         &MenuItem::with_id(app, "open-folder", "Open Folder…", true, Some("CmdOrCtrl+O"))?,
         &PredefinedMenuItem::separator(app)?,
         &MenuItem::with_id(app, "save", "Save", true, Some("CmdOrCtrl+S"))?,
+        &MenuItem::with_id(app, "save-all", "Save All", true, Some("CmdOrCtrl+Shift+S"))?,
         &PredefinedMenuItem::separator(app)?,
     ])?;
+    let workspace_menu = Submenu::with_items(app, "Workspace", true, &[
+        &MenuItem::with_id(app, "quick-open", "Quick Open…", true, Some("CmdOrCtrl+P"))?,
+        &MenuItem::with_id(app, "commands", "Command Palette…", true, Some("CmdOrCtrl+Shift+P"))?,
+        &MenuItem::with_id(app, "search", "Find in Files…", true, Some("CmdOrCtrl+Shift+F"))?,
+        &PredefinedMenuItem::separator(app)?,
+        &MenuItem::with_id(app, "reopen", "Reopen Closed Editor", true, Some("CmdOrCtrl+Shift+T"))?,
+        &MenuItem::with_id(app, "close-others", "Close Other Editors", true, None::<&str>)?,
+        &MenuItem::with_id(app, "close-all", "Close All Editors", true, None::<&str>)?,
+        &MenuItem::with_id(app, "wrap", "Toggle Word Wrap", true, None::<&str>)?,
+    ])?;
+    menu.append(&workspace_menu)?;
     Ok(menu)
 }
 
@@ -65,6 +79,12 @@ fn main() {
                 }
                 "open-folder" => "nodal:open-folder",
                 "save" => "nodal:save",
+                "new-file" | "new-folder" | "save-all" | "quick-open" | "commands" | "search" | "reopen" | "close-others" | "close-all" | "wrap" => {
+                    if let Some(window) = app.webview_windows().into_values().find(|window| window.is_focused().unwrap_or(false)) {
+                        if let Err(error) = app.emit_to(window.label(), "nodal:command", event.id().as_ref()) { eprintln!("Unable to dispatch workspace action: {error}"); }
+                    }
+                    return;
+                }
                 _ => return,
             };
             if let Some(window) = app.webview_windows().into_values().find(|window| window.is_focused().unwrap_or(false)) {

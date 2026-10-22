@@ -1,0 +1,8 @@
+.code-tools { height: 30px; flex-shrink: 0; display: flex; align-items: center; gap: 3px; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--bg-side); }
+.code-tools button { gap: 5px; padding: 3px 6px; font-size: 11px; color: var(--fg-muted); white-space: nowrap; }
+.code-tools button:hover, .code-tools button[aria-pressed=true] { color: var(--fg-strong); background: var(--bg-hover); }
+.code-tools > span { flex: 1; }
+.editor-preferences { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-side); font-size: 12px; }
+.editor-preferences label { display: flex; align-items: center; gap: 6px; }
+.editor-preferences select { width: auto; min-width: 60px; }
+.editor-preferences button { margin-left: auto; padding: 4px 8px; }
