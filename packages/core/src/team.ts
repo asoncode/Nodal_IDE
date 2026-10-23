@@ -1,4 +1,4 @@
-import { roleOwnsPath, type Graph, type Role, type WorkflowNode } from '../../shared/src/index.js';
+import { nodeEdits, nodeRole, roleOwnsPath, type Graph, type Role, type WorkflowNode } from '../../shared/src/index.js';
 import type { TeamPlan } from '../../shared/src/team.js';
 import type { ValidationIssue } from './validation.js';
 
@@ -27,16 +27,16 @@ function reachable(start: string, edges: Graph['edges']): Set<string> {
 export function withHandoffEdges(input: Graph): Graph {
   const graph = structuredClone(input);
   const control = graph.edges.filter(edge => edge.kind === 'control');
-  const agents = graph.nodes.filter((node): node is Extract<WorkflowNode, { kind: 'agent' }> => node.kind === 'agent' && !!node.config.role);
+  const agents = graph.nodes.filter(node => !!nodeRole(node));
   const downstream = new Map(agents.map(node => [node.id, reachable(node.id, control)]));
   const stableId = (parts: string[]) => {
     let hash = 2166136261;
     for (const char of JSON.stringify(parts)) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
     return `handoff-${(hash >>> 0).toString(16)}`;
   };
-  for (const consumer of agents) for (const handoff of consumer.config.role!.consumes) {
+  for (const consumer of agents) for (const handoff of nodeRole(consumer)!.consumes) {
     const candidates = agents.filter(producer => producer.id !== consumer.id && !producer.disabled && downstream.get(producer.id)!.has(consumer.id) &&
-      producer.config.role!.produces.some(output => output.name === handoff.name && output.path === handoff.path && (!handoff.required || output.required)));
+      nodeRole(producer)!.produces.some(output => output.name === handoff.name && output.path === handoff.path && (!handoff.required || output.required)));
     const latest = candidates.filter(producer => !candidates.some(other => other.id !== producer.id && downstream.get(producer.id)!.has(other.id)));
     if (latest.length !== 1) continue;
     const producer = latest[0]!;
@@ -106,41 +106,54 @@ function hasUngatedCompletion(graph: Graph, roleNode: WorkflowNode): boolean {
 }
 
 /** Additional policy checks for workflows that opt into specialist roles. Existing flat workflows remain valid. */
-export function validateTeamGraph(graph: Graph): ValidationIssue[] {
-  const agents = graph.nodes.filter((node): node is Extract<WorkflowNode, { kind: 'agent' }> => node.kind === 'agent');
-  const specialists = agents.filter(node => node.config.role);
+/**
+ * A coding role is verified when every control path to End passes a test gate: either a team-level
+ * gate after the role, or (for a role node) gates inside its playbook covering every inner coding step.
+ */
+export function roleTestGated(graph: Graph, node: WorkflowNode, playbook?: Graph): boolean {
+  if (!hasUngatedCompletion(graph, node)) return true;
+  if (node.kind !== 'role' || !playbook) return false;
+  const coding = playbook.nodes.filter(step => step.kind === 'agent' && !step.disabled && step.config.permission === 'scoped-edit');
+  return coding.length > 0 && coding.every(step => !hasUngatedCompletion(playbook, step));
+}
+
+/** Additional policy checks for workflows that opt into specialist roles. Existing flat workflows remain valid. */
+export function validateTeamGraph(graph: Graph, playbooks: Map<string, Graph> = new Map()): ValidationIssue[] {
+  const workers = graph.nodes.filter(node => node.kind === 'agent' || node.kind === 'role');
+  const specialists = workers.filter(node => !!nodeRole(node));
   if (!specialists.length) return [];
   const errors: ValidationIssue[] = [];
   const issue = (code: string, message: string, nodeId: string) => errors.push({ code, message, nodeId });
   const ordinary = graph.edges.filter(edge => edge.kind !== 'loop');
-  const downstream = new Map(agents.map(node => [node.id, reachable(node.id, ordinary)]));
-  const coding = agents.filter(node => !node.disabled && node.config.permission === 'scoped-edit');
-  const roleCount = new Set(specialists.map(node => node.config.role!.id)).size;
-  for (const node of agents) {
-    const role = node.config.role;
+  const downstream = new Map(workers.map(node => [node.id, reachable(node.id, ordinary)]));
+  const coding = workers.filter(node => !node.disabled && nodeEdits(node));
+  const roleCount = new Set(specialists.map(node => nodeRole(node)!.id)).size + specialists.filter(node => node.kind === 'role').length;
+  for (const node of workers) {
+    const role = nodeRole(node);
     if (!role) {
-      if (roleCount > 1 && node.config.permission === 'scoped-edit' && !node.disabled) issue('generic_implementation', `${node.label}: assign a specialist role to every coding step in a team workflow.`, node.id);
+      if (roleCount > 1 && nodeEdits(node) && !node.disabled) issue('generic_implementation', `${node.label}: assign a specialist role to every coding step in a team workflow.`, node.id);
       continue;
     }
     if (node.disabled) continue;
-    if (node.config.permission === 'scoped-edit') {
+    if (nodeEdits(node)) {
       if (!role.owns.length) issue('role_ownership', `${role.title}: a coding role must own at least one path.`, node.id);
-      if (hasUngatedCompletion(graph, node)) issue('role_test_gate', `${role.title}: every control path to End must pass an enabled command/test quality gate after this role.`, node.id);
+      if (!roleTestGated(graph, node, playbooks.get(node.id))) issue('role_test_gate', `${role.title}: every control path to End must pass an enabled command/test quality gate, after this role or inside its playbook.`, node.id);
     }
     for (const output of role.produces) {
-      if (node.config.permission !== 'scoped-edit' || !roleOwnsPath(role.owns, output.path)) issue('handoff_ownership', `${role.title}: producing ${output.path} requires edit ownership of that path.`, node.id);
+      if (!nodeEdits(node) || !roleOwnsPath(role.owns, output.path)) issue('handoff_ownership', `${role.title}: producing ${output.path} requires edit ownership of that path.`, node.id);
     }
     for (const input of role.consumes) {
       const producer = specialists.some(other => other.id !== node.id && !other.disabled && downstream.get(other.id)?.has(node.id) &&
-        other.config.role!.produces.some(output => output.name === input.name && output.path === input.path && (!input.required || output.required)));
+        nodeRole(other)!.produces.some(output => output.name === input.name && output.path === input.path && (!input.required || output.required)));
       if (!producer) issue('missing_handoff', `${role.title}: ${input.name} at ${input.path} must be produced by an enabled upstream role.`, node.id);
     }
   }
   for (let i = 0; i < coding.length; i++) for (let j = i + 1; j < coding.length; j++) {
     const a = coding[i]!; const b = coding[j]!;
-    if (!a.config.role || !b.config.role || downstream.get(a.id)?.has(b.id) || downstream.get(b.id)?.has(a.id)) continue;
-    if (a.config.role.owns.some(left => b.config.role!.owns.some(right => ownershipMayOverlap(left, right)))) {
-      issue('parallel_ownership', `${a.config.role.title} and ${b.config.role.title} may run concurrently with overlapping ownership. Use disjoint directory scopes or order these roles; ambiguous wildcard overlaps are rejected.`, b.id);
+    const left = nodeRole(a); const right = nodeRole(b);
+    if (!left || !right || downstream.get(a.id)?.has(b.id) || downstream.get(b.id)?.has(a.id)) continue;
+    if (left.owns.some(scope => right.owns.some(other => ownershipMayOverlap(scope, other)))) {
+      issue('parallel_ownership', `${left.title} and ${right.title} may run concurrently with overlapping ownership. Use disjoint directory scopes or order these roles; ambiguous wildcard overlaps are rejected.`, b.id);
     }
   }
   return errors;

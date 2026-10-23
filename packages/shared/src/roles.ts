@@ -5,7 +5,8 @@ export const RolePathSchema = z.string().min(1).max(500).refine(value =>
   !value.startsWith('/') && !/[:\\\x00-\x1f]/.test(value) &&
   !value.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git'),
 'Use a relative repository path without traversal or Git metadata. External knowledge is not supported.');
-const ScopeSchema = RolePathSchema.refine(value => !/[\[\]{}!()]/.test(value), 'Scopes support literal paths, *, ** and ? only.');
+export const RoleScopeSchema = RolePathSchema.refine(value => !/[\[\]{}!()]/.test(value), 'Scopes support literal paths, *, ** and ? only.');
+const ScopeSchema = RoleScopeSchema;
 const HandoffSchema = z.object({
   name: z.string().trim().min(1).max(100),
   path: RolePathSchema.refine(value => !/[*?]/.test(value), 'Handoffs require a literal file path.'),

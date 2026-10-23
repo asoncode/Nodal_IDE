@@ -4,10 +4,10 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { runProcess, type ProcessResult } from './process.js';
 
-export async function git(repoRoot: string, args: string[], signal?: AbortSignal): Promise<ProcessResult> {
+export async function git(repoRoot: string, args: string[], signal?: AbortSignal, maxOutputBytes?: number): Promise<ProcessResult> {
   // A caller's Git environment must not redirect an attempt to a different index or repository.
   const env = Object.fromEntries(Object.keys(process.env).filter(key => key.startsWith('GIT_')).map(key => [key, undefined]));
-  return runProcess({ command: 'git', args: ['--literal-pathspecs', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args], cwd: repoRoot, env, signal, timeoutMs: 30_000 });
+  return runProcess({ command: 'git', args: ['--literal-pathspecs', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args], cwd: repoRoot, env, signal, timeoutMs: 30_000, ...(maxOutputBytes ? { maxOutputBytes } : {}) });
 }
 async function checkedGit(root: string, args: string[], preserveWhitespace = false): Promise<string> {
   const result = await git(root, args);

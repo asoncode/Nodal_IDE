@@ -13,6 +13,8 @@ import * as workspace from '../../workspace/src/index.js';
 import { checkAvailability, runProvider } from '../../providers/src/index.js';
 import { ChatRuntime } from './chat.js';
 import { upstreamContext } from './context.js';
+import { runTool, type ToolOutput } from './tools.js';
+import { playbookGraph, type RoleNode } from '../../core/src/playbook.js';
 import { TerminalRuntime } from './terminals.js';
 import type { GenerationResult, GenerationSnapshot } from '../../shared/src/generation.js';
 import { PlanningOptionsSchema, TeamPlanSchema, type PlanningOptions } from '../../shared/src/team.js';
@@ -37,6 +39,8 @@ export const PLANNING_RULES = `Wiring rules (the graph is rejected if any is bro
 Design guidance:
 - Every step automatically receives the results of all earlier steps (plans, summaries, failing test output) and starts from the code the nearest earlier coding step committed. Do not add nodes only to pass information along.
 - Parallelize independent work (for example backend and frontend after a shared plan): fan out from a "parallel" node to one agent per branch, give each branch its own test command and quality gate loop, send each gate's "pass" edge to a "join" (mode "all_success"), then a "merge" node whose config.sourceNodeIds lists the branch agents. Later coding or command steps must come after that merge; a step cannot start from two code branches.
+- Deterministic tool steps need no model and no approval: {"kind":"tool","config":{"tool":"search","query":"...","paths":["src"]}}. Tools: search (query, regex, caseSensitive), symbols (name), read (paths), list, git (mode log|diff|blame), test-impact, validate (path, optional JSON schema), step-output (nodeId of an earlier step). Results expose "count" (and "valid" for validate), so a gate can check {"field":"count","operator":"eq","value":0}. Use a tool step whenever no judgment is needed: search before an agent reads, validate contracts instead of asking a reviewer.
+- Represent each specialist as a role node: {"kind":"role","config":{"role":<role>,"playbook":{"nodes":[...],"edges":[...]}}}. The playbook is the role's internal workflow with its own start and end, using only start, end, agent, command, tool, condition, and quality_gate steps on one code lineage. Inner agents work as the role, so they never set their own "role". Give each coding role an inner test command and quality_gate loop back to its implementing agent, plus an orienting tool step first. The team level then shows only roles, gates, merges, reviews, and approvals.
 - A review that can send work back goes after the test gates: a scoped-edit agent that addresses review findings (on the first pass it does final polish), then a read-only reviewer whose instructions end with "Reply with a final line VERDICT: PASS or VERDICT: FAIL", then a quality_gate with config.predicate = {"sourceNodeId": "<reviewer id>", "field": "output", "operator": "contains", "value": "VERDICT: PASS"} whose fail loop returns to the addressing agent. Test gates stay the authority; the review gate adds to them.
 Valid example with a bounded loop: ${JSON.stringify(featureBuilder)}`;
 
@@ -96,6 +100,8 @@ const requestSchemas = {
 };
 type PendingApproval = { request: ApprovalRequest; resolve: (approved: boolean) => void };
 type WorkspaceResult = { worktree: workspace.AttemptWorktree; head: string };
+/** Present when a step runs inside a role node's playbook. */
+type ExecutionScope = { baseHead: string; parentAttemptId: string };
 
 export class NodalService {
   private engines = new Map<string, WorkflowEngine>();
@@ -205,7 +211,7 @@ export class NodalService {
     const validation = validateGraph(input);
     if (!validation.valid) throw new Error(validation.errors.map(e => e.message).join('\n'));
     const graph = structuredClone(validation.graph!);
-    for (const node of graph.nodes) if (node.kind === 'agent' && node.config.role) validateRole(node.config.role);
+    for (const node of graph.nodes) if ((node.kind === 'agent' || node.kind === 'role') && node.config.role) validateRole(node.config.role);
     if (JSON.stringify(redact(graph)) !== JSON.stringify(graph)) throw new Error('Graph appears to contain credentials. Use official provider authentication; do not put secrets in commands or prompts.');
     const repo = await workspace.inspectRepository(this.store.project(projectId).root).catch(() => { throw new Error('Workflows require the root of a Git repository with an initial commit. You can still browse and edit this folder.'); });
     const runId = randomUUID();
@@ -270,10 +276,12 @@ export class NodalService {
     if (previous?.head && ctx.attempt.iteration > 1) return [previous];
     return [...found.values()];
   }
-  private async execute(ctx: ExecutionContext, run: StoredRun): Promise<NodeResult> {
+  private async execute(ctx: ExecutionContext, run: StoredRun, scope?: ExecutionScope): Promise<NodeResult> {
     const node = ctx.node; const project = this.store.project(run.projectId);
     const inputs = this.upstreamWorkspaces(ctx, run);
     if (inputs.length > 1 && node.kind !== 'merge') return { status: 'failed', error: 'Multiple coding branches require an explicit Merge node before execution.' };
+    if (node.kind === 'tool') return this.executeTool(ctx, run, inputs[0]?.head ?? scope?.baseHead ?? run.repositorySha!, scope);
+    if (node.kind === 'role') return scope ? { status: 'failed', error: 'Roles cannot run inside another role.' } : this.executeRole(ctx, run, inputs[0]?.head ?? run.repositorySha!);
     if (!['agent','command','merge'].includes(node.kind)) return { status: 'succeeded' };
     if (node.kind === 'agent' && node.config.provider === 'demo' && node.config.role) return { status: 'failed', error: 'Demo agents cannot publish verified role handoffs. Select a live provider.' };
     if (node.kind === 'agent' && node.config.provider === 'demo') {
@@ -287,7 +295,7 @@ export class NodalService {
       if (!await this.permission(ctx, `Send this task and repository context to ${node.config.provider}? Permission: ${node.config.permission}. Official provider billing/plan limits apply.`, { kind: 'provider', provider: node.config.provider, permission: node.config.permission, instructions: node.config.instructions, model: node.config.model ?? 'Provider default' })) return { status: 'failed', error: 'Provider request was denied.' };
     }
     if (ctx.signal.aborted) return { status: 'failed', error: 'Cancelled' };
-    const worktree = await workspace.createAttemptWorktree({ repoRoot: project.root, attemptId: ctx.attempt.id, baseRef: node.kind === 'merge' ? run.repositorySha : inputs[0]?.head ?? run.repositorySha, workspaceRoot: join(this.dataDir, 'worktrees') });
+    const worktree = await workspace.createAttemptWorktree({ repoRoot: project.root, attemptId: ctx.attempt.id, baseRef: node.kind === 'merge' ? run.repositorySha : inputs[0]?.head ?? scope?.baseHead ?? run.repositorySha, workspaceRoot: join(this.dataDir, 'worktrees') });
     if (ctx.signal.aborted) return { status: 'failed', error: 'Cancelled; worktree preserved.' };
     this.store.upsertAttempt({ ...ctx.attempt, worktreePath: worktree.path, sourceCommit: worktree.sourceCommit });
     await ctx.emit('workspace.created', worktree);
@@ -363,6 +371,86 @@ export class NodalService {
     await writeDisk(artifactPath, redact(diff), { mode: 0o600 });
     for (const handoff of handoffs) { this.store.saveHandoff(ctx.runId, handoff); await ctx.emit('handoff.verified', handoff); }
     return { status: succeeded ? 'succeeded' : 'failed', error: succeeded ? undefined : 'Command did not pass its required exit status.', output: { ...output, worktree, head: committed.head }, artifacts: [...contextArtifacts, { id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
+  }
+  /** Read-only and deterministic for a commit, so results are cached and need no approval prompt. */
+  private async executeTool(ctx: ExecutionContext, run: StoredRun, commit: string, scope?: ExecutionScope): Promise<NodeResult> {
+    if (ctx.node.kind !== 'tool') return { status: 'failed', error: 'Not a tool step.' };
+    const config = ctx.node.config;
+    const baseCommit = scope?.baseHead ?? run.repositorySha!;
+    const cacheable = config.tool !== 'step-output';
+    const key = digest(JSON.stringify({ config, commit, baseCommit }));
+    type Stored = { status: 'succeeded' | 'failed'; output: ToolOutput; error?: string };
+    const cached = cacheable ? this.store.toolResult<Stored>(key) : undefined;
+    const result = cached ?? await runTool(config, {
+      root: this.store.project(run.projectId).root, commit, baseCommit, inputs: ctx.inputs,
+      index: async (blob, compute) => { const known = this.store.fileIndex<Awaited<ReturnType<typeof compute>>>(blob); if (known) return known; const value = await compute(); this.store.saveFileIndex(blob, value); return value; },
+    });
+    if (cacheable && !cached) this.store.saveToolResult(key, config.tool, commit, result);
+    await ctx.emit('tool.result', { tool: config.tool, commit, count: result.output.count, truncated: result.output.truncated, cached: !!cached, ...(result.error ? { error: result.error } : {}) });
+    return { status: result.status, output: result.output, ...(result.error ? { error: result.error } : {}) };
+  }
+
+  /**
+   * Runs a role's playbook as a scoped child of this run. The child inherits the run's commit lineage,
+   * cannot exceed the remaining attempt budget or the role step's timeout, and publishes only after
+   * ownership and produced handoffs are verified for everything the playbook changed.
+   */
+  private async executeRole(ctx: ExecutionContext, run: StoredRun, baseHead: string): Promise<NodeResult> {
+    if (ctx.node.kind !== 'role') return { status: 'failed', error: 'Not a role step.' };
+    const node = ctx.node as RoleNode;
+    const role = validateRole(node.config.role);
+    const remaining = Math.max(1, run.graph.settings.maxTotalAttempts - this.store.attempts(ctx.runId).length);
+    const graph = playbookGraph(node, { maxTotalAttempts: remaining, timeoutMs: node.timeoutMs });
+    const childRun: StoredRun = { ...run, graph };
+    const scope: ExecutionScope = { baseHead, parentAttemptId: ctx.attempt.id };
+    let last: WorkspaceResult | undefined;
+    const summaries: string[] = [];
+    const engine = new WorkflowEngine(graph, {
+      runId: ctx.runId,
+      execute: async inner => {
+        const result = await this.execute({ ...inner, inputs: { ...ctx.inputs, ...inner.inputs } }, childRun, scope);
+        const output = result.output as (Partial<WorkspaceResult> & { output?: unknown }) | undefined;
+        if (result.status === 'succeeded' && output?.worktree && output.head) last = { worktree: output.worktree, head: output.head };
+        if (result.status === 'succeeded' && inner.node.kind === 'agent' && typeof output?.output === 'string') summaries.push(`## ${inner.node.label}\n${output.output}`);
+        return result;
+      },
+      onEvent: async event => {
+        // Child run-level events must not change the parent run's status; steps are tagged with their role attempt.
+        const payload = event.payload as Record<string, unknown>;
+        const kind = event.kind.startsWith('run.') ? `role.${event.kind}` : event.kind;
+        const tagged = payload?.attempt ? { ...payload, attempt: { ...(payload.attempt as object), parentAttemptId: ctx.attempt.id } } : payload;
+        this.store.appendEvent({ ...event, kind, payload: tagged, ...(kind !== event.kind ? { nodeId: node.id, attemptId: ctx.attempt.id } : {}) });
+      },
+    });
+    const stop = () => void engine.cancel(String(ctx.signal.reason ?? 'Role step stopped.'));
+    ctx.signal.addEventListener('abort', stop, { once: true });
+    let snapshot;
+    try { snapshot = await engine.start(); } finally { ctx.signal.removeEventListener('abort', stop); }
+    const output: Record<string, unknown> = { output: summaries.join('\n\n').slice(-16_000), roleId: role.id, playbook: { status: snapshot.status, attempts: snapshot.attempts.length } };
+    if (snapshot.status !== 'succeeded') return { status: 'failed', error: `${role.title} playbook ${snapshot.status}: ${snapshot.error ?? 'no successful End path'}`, output };
+    if (!last) {
+      if (role.produces.some(handoff => handoff.required)) return { status: 'failed', error: `${role.title} produced no committed changes, so its required handoffs cannot be verified.`, output };
+      return { status: 'succeeded', output };
+    }
+    const workspaceResult = last as WorkspaceResult;
+    let produced: Awaited<ReturnType<typeof verifyProduced>>;
+    try {
+      // Everything the playbook changed since the role started, including inner command steps, must stay in the role's area.
+      await enforceOwnership(workspaceResult.worktree.path, baseHead, role);
+      produced = await verifyProduced(workspaceResult.worktree.path, role);
+      await verifyCommittedHandoffs(workspaceResult.worktree.path, workspaceResult.head, produced);
+    } catch (error) {
+      const message = (error as Error).message;
+      await ctx.emit('role.policy_violation', { roleId: role.id, error: message });
+      return { status: 'failed', error: message, output: { ...output, worktree: workspaceResult.worktree } };
+    }
+    const handoffs: VerifiedHandoff[] = produced.map(handoff => ({ ...handoff, producerNodeId: node.id, attemptId: ctx.attempt.id, commit: workspaceResult.head }));
+    for (const handoff of handoffs) { this.store.saveHandoff(ctx.runId, handoff); await ctx.emit('handoff.verified', handoff); }
+    const diff = await workspace.getDiff(this.store.project(run.projectId).root, workspaceResult.head);
+    const artifactId = randomUUID(); const artifactPath = join(this.dataDir, 'artifacts', `${artifactId}.diff`);
+    await mkdir(join(this.dataDir, 'artifacts'), { recursive: true, mode: 0o700 });
+    await writeDisk(artifactPath, redact(diff), { mode: 0o600 });
+    return { status: 'succeeded', output: { ...output, worktree: workspaceResult.worktree, head: workspaceResult.head, handoffs }, artifacts: [{ id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
   }
   private async diffs(projectId: string, runId?: string) {
     const project = this.store.project(projectId); const repo = await workspace.inspectRepository(project.root).catch(() => undefined);

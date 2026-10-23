@@ -2,7 +2,7 @@ import type { Graph } from '../../shared/src/index.js';
 import { redact } from '../../persistence/src/index.js';
 
 type Result = { status?: string; route?: string; error?: string; output?: unknown };
-type Section = { header: string; body: string; kind: 'agent' | 'failing' | 'log' | 'none' };
+type Section = { header: string; body: string; kind: 'agent' | 'failing' | 'log' | 'tool' | 'none' };
 
 const head = (text: string, max: number) => text.length <= max ? text : `${text.slice(0, Math.max(0, max))}\n…[${text.length - max} later characters omitted]`;
 const tail = (text: string, max: number) => text.length <= max ? text : `…[${text.length - max} earlier characters omitted]\n${text.slice(-Math.max(0, max))}`;
@@ -18,7 +18,11 @@ export function upstreamContext(inputs: Record<string, Result>, graph: Graph, bu
     const node = graph.nodes.find(item => item.id === id);
     if (!node) return [];
     const header = `## ${node.label} (${node.kind}): ${result.status ?? 'unknown'}${result.route ? `, route ${result.route}` : ''}${result.error ? `\nError: ${result.error}` : ''}`;
-    if (node.kind === 'agent') return [{ header, body: String(field(result.output, 'output') ?? ''), kind: 'agent' }];
+    if (node.kind === 'agent' || node.kind === 'role') return [{ header: node.kind === 'role' ? `${header}\nRole: ${node.config.role.title}` : header, body: String(field(result.output, 'output') ?? ''), kind: 'agent' }];
+    if (node.kind === 'tool') {
+      const { tool, commit, ...rest } = (result.output ?? {}) as Record<string, unknown>;
+      return [{ header: `${header}\nTool: ${String(tool ?? node.config.tool)} at ${String(commit ?? '').slice(0, 12)}`, body: JSON.stringify(rest), kind: 'tool' }];
+    }
     if (node.kind === 'command') {
       const output = result.output;
       const logs = [field(output, 'stdout'), field(output, 'stderr')].filter(text => typeof text === 'string' && text).join('\n');
@@ -31,10 +35,10 @@ export function upstreamContext(inputs: Record<string, Result>, graph: Graph, bu
   const room = Math.max(0, budget - fixed - 200);
   const count = (kind: Section['kind']) => Math.max(1, sections.filter(section => section.kind === kind && section.body).length);
   // Shares are ceilings; text shorter than its share is kept whole.
-  const shares = { agent: Math.floor(room * 0.55 / count('agent')), failing: Math.floor(room * 0.3 / count('failing')), log: Math.floor(room * 0.15 / count('log')), none: 0 };
+  const shares = { agent: Math.floor(room * 0.5 / count('agent')), failing: Math.floor(room * 0.25 / count('failing')), tool: Math.floor(room * 0.12 / count('tool')), log: Math.floor(room * 0.13 / count('log')), none: 0 };
   const text = sections.map(section => {
     if (!section.body) return section.header;
-    const body = section.kind === 'agent' ? head(section.body, shares.agent) : tail(section.body, shares[section.kind]);
+    const body = section.kind === 'agent' || section.kind === 'tool' ? head(section.body, shares[section.kind]) : tail(section.body, shares[section.kind]);
     return `${section.header}\n${body}`;
   }).join('\n\n');
   return redact(head(text, budget - 60));

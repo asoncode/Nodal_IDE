@@ -56,6 +56,9 @@ export class Store {
       CREATE INDEX IF NOT EXISTS runs_project ON runs(project_id);
       INSERT OR IGNORE INTO migrations VALUES(1,datetime('now'));
       INSERT OR IGNORE INTO migrations VALUES(2,datetime('now'));
+      CREATE TABLE IF NOT EXISTS tool_cache(key TEXT PRIMARY KEY, tool TEXT NOT NULL, repo_sha TEXT NOT NULL, json TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS repo_index(blob TEXT PRIMARY KEY, json TEXT NOT NULL, created_at TEXT NOT NULL);
+      INSERT OR IGNORE INTO migrations VALUES(3,datetime('now'));
     `));
   }
   transaction<T>(action: () => T): T {
@@ -104,6 +107,14 @@ export class Store {
     this.db.prepare('INSERT INTO roles VALUES(?,?,?) ON CONFLICT(project_id,id) DO UPDATE SET json=excluded.json').run(projectId, role.id, json(role)); return role;
   }
   deleteRole(projectId: string, roleId: string): void { this.project(projectId); this.db.prepare('DELETE FROM roles WHERE project_id=? AND id=?').run(projectId, roleId); }
+  /** Deterministic tool results, keyed by tool, configuration and commit. */
+  toolResult<T>(key: string): T | undefined { return this.one<T>('SELECT json FROM tool_cache WHERE key=?', key); }
+  saveToolResult(key: string, tool: string, repoSha: string, output: unknown): void {
+    this.db.prepare('INSERT OR REPLACE INTO tool_cache VALUES(?,?,?,?,?)').run(key, tool, repoSha, json(output), now());
+  }
+  /** Content-addressed file index: a Git blob SHA identifies exact file contents. */
+  fileIndex<T>(blob: string): T | undefined { return this.one<T>('SELECT json FROM repo_index WHERE blob=?', blob); }
+  saveFileIndex(blob: string, index: unknown): void { this.db.prepare('INSERT OR REPLACE INTO repo_index VALUES(?,?,?)').run(blob, json(index), now()); }
   saveHandoff(runId: string, handoff: VerifiedHandoff): void { this.db.prepare('INSERT INTO handoffs VALUES(?,?,?,?) ON CONFLICT(run_id,attempt_id,name) DO UPDATE SET json=excluded.json').run(runId, handoff.attemptId, handoff.name, json(handoff)); }
   handoffs(runId: string): VerifiedHandoff[] { this.run(runId); return this.many('SELECT json FROM handoffs WHERE run_id=? ORDER BY rowid', runId); }
   saveGraph(projectId: string, graph: Graph): Graph {

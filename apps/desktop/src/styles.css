@@ -364,3 +364,19 @@ input[type=checkbox], input[type=range] { accent-color: var(--gold); }
 .ownership-file { display: block; margin: 5px 0; color: var(--fg-muted); font-size: 10px; overflow-wrap: anywhere; }
 .role-run-details details { margin: 8px 0; }
 .role-run-details pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; max-height: 240px; overflow: auto; }
+
+/* Role nodes contain a workflow: a doubled frame marks them as composite. */
+.wf-node.wf-role { box-shadow: inset 3px 0 0 var(--wf-state, transparent), 0 0 0 3px var(--bg), 0 0 0 4px var(--border-strong); }
+.wf-node.wf-role.selected { box-shadow: inset 3px 0 0 var(--wf-state, transparent), 0 0 0 3px var(--bg), 0 0 0 4px var(--gold); }
+.wf-node-progress { color: var(--gold); }
+.crumb-link { color: var(--fg-muted); font-size: 12px; }
+.crumb-link:hover { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+.tool-editor { display: grid; gap: 12px; }
+.playbook-editor { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.playbook-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--fg-muted); }
+.playbook-toolbar > span { flex: 1; min-width: 0; }
+.playbook-toolbar select { width: auto; }
+.playbook-problems { padding: 8px 12px 8px 30px; border-bottom: 1px solid var(--border); color: var(--err); }
+.playbook-body { flex: 1; min-height: 0; display: flex; }
+.playbook-body > .canvas { flex: 1; min-width: 0; }
+.playbook-step { width: 280px; flex-shrink: 0; overflow: auto; padding: 12px 14px; border-left: 1px solid var(--border); background: var(--bg-side); display: flex; flex-direction: column; gap: 12px; }

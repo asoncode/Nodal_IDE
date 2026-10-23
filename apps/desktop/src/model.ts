@@ -10,7 +10,7 @@ export interface Attempt { id: string; nodeId: string; state: string; status?: s
 export interface Approval { id: string; message?: string; nodeId: string; decision?: string | null; scope?: unknown; requestedAt?: string }
 export interface Inspection { run: Run; attempts: Attempt[]; approvals: Approval[]; checkpoints: unknown[] }
 export interface FileBuffer { path: string; content: string; savedContent: string; hash: string; external?: { content: string; hash: string } }
-export const NODE_LABELS: Record<NodeKind, string> = { start: 'Start', agent: 'Agent', command: 'Command / test', condition: 'Condition', parallel: 'Parallel split', join: 'Join', quality_gate: 'Quality loop', approval: 'Human approval', merge: 'Merge', end: 'End' };
+export const NODE_LABELS: Record<NodeKind, string> = { start: 'Start', agent: 'Agent', command: 'Command / test', condition: 'Condition', parallel: 'Parallel split', join: 'Join', quality_gate: 'Quality loop', approval: 'Human approval', merge: 'Merge', end: 'End', tool: 'Tool', role: 'Role' };
 export function createNode(kind: NodeKind, index: number): GraphNode {
   return makeNode(kind, crypto.randomUUID(), { x: 100 + (index % 3) * 270, y: 80 + Math.floor(index / 3) * 150 });
 }

@@ -101,6 +101,21 @@ describe('workspace flows', () => {
     expect(screen.getByLabelText('Role title')).toHaveProperty('value', 'UI engineer');
   });
 
+  it('opens a role playbook from the inspector and saves edits to its steps in the workflow', async () => {
+    const role = createNode('role', 2); role.id = 'role-1'; role.label = 'Simulation';
+    graph.nodes.splice(2, 0, role); graph.edges = [...graph.edges.filter(edge => edge.id !== 'b'), { id: 'b', source: 'command-1', target: 'role-1', kind: 'control' }, { id: 'c', source: 'role-1', target: graph.nodes.at(-1)!.id, kind: 'control' }];
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Simulation' }));
+    fireEvent.click(screen.getByRole('button', { name: /Open playbook/ }));
+    expect(screen.getByRole('tab', { name: /Simulation playbook/ }).getAttribute('aria-selected')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Implement' }));
+    fireEvent.change(screen.getByLabelText('Step task'), { target: { value: 'Build the seeded simulator.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls.some(call => call.method === 'saveGraph')).toBe(true));
+    const saved = (calls.find(call => call.method === 'saveGraph')!.params.graph as Graph).nodes.find(node => node.id === 'role-1');
+    expect(saved?.kind === 'role' && saved.config.playbook.nodes.find(step => step.id === 'implement')).toMatchObject({ config: { instructions: 'Build the seeded simulator.' } });
+  });
+
   it('saves node configuration through the real graph document contract', async () => {
     await ready();
     fireEvent.click(screen.getByRole('button', { name: 'Check Node' }));

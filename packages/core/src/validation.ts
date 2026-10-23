@@ -1,5 +1,6 @@
 import { GraphSchema, type Graph, type WorkflowEdge } from '../../shared/src/index.js';
 import { validateTeamGraph } from './team.js';
+import { playbookGraph } from './playbook.js';
 
 export interface ValidationIssue {
   code: string;
@@ -162,6 +163,39 @@ export function validateGraph(input: unknown): ValidationResult {
     }
     regions.push(region);
   }
-  errors.push(...validateTeamGraph(graph));
+  // Role nodes: each playbook must be a valid workflow on its own; its role's team rules are checked at team level.
+  const playbooks = new Map<string, Graph>();
+  for (const node of graph.nodes) {
+    if (node.kind === 'tool') {
+      const config = node.config;
+      if (config.tool === 'step-output' && (!nodes.has(config.nodeId) || !descendants(config.nodeId, ordinary).has(node.id) || config.nodeId === node.id)) {
+        issue('tool_source', `${node.label}: step-output must name an earlier step in this workflow.`, node.id);
+      }
+      if (config.tool === 'git' && config.mode === 'blame' && (config.paths.length !== 1 || /[*?]/.test(config.paths[0]!))) {
+        issue('tool_config', `${node.label}: blame needs exactly one literal file path.`, node.id);
+      }
+    }
+    if (node.kind !== 'role') continue;
+    for (const step of node.config.playbook.nodes) if (step.kind === 'agent' && step.config.role) {
+      issue('playbook_role', `${node.label} playbook: ${step.label} works as the role ${node.config.role.title}; remove its separate role.`, node.id);
+    }
+    let playbook: Graph;
+    try { playbook = playbookGraph(node, { interface: 'validation' }); }
+    catch (error) { issue('playbook', `${node.label} playbook: ${error instanceof Error ? error.message : String(error)}`, node.id); continue; }
+    playbooks.set(node.id, playbook);
+    const own = new Set(node.config.playbook.nodes.map(step => step.id));
+    const inner = validateGraph(playbook);
+    for (const problem of inner.errors) {
+      // Inner tool steps may read earlier team-level steps, which a standalone playbook cannot see.
+      if (problem.code === 'role_test_gate' || (problem.code === 'tool_source' && problem.nodeId && !playbookReadsOwnStep(node, problem.nodeId, own))) continue;
+      issue(problem.code, `${node.label} playbook: ${problem.message}`, node.id);
+    }
+  }
+  errors.push(...validateTeamGraph(graph, playbooks));
   return { valid: errors.length === 0, errors, graph };
+}
+
+function playbookReadsOwnStep(node: Extract<Graph['nodes'][number], { kind: 'role' }>, stepId: string, own: Set<string>): boolean {
+  const step = node.config.playbook.nodes.find(item => `${node.id}/${item.id}` === stepId);
+  return step?.kind === 'tool' && step.config.tool === 'step-output' && own.has(step.config.nodeId);
 }
