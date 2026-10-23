@@ -106,6 +106,13 @@ export async function diffCommits(root: string, base: string, commit: string, sc
   return { base, files, patch: files.length ? patch.stdout : '', truncated: patch.truncated };
 }
 
+/** Paths changed between two commits, without the patch. */
+export async function changedFiles(root: string, base: string, commit: string): Promise<string[]> {
+  assertCommit(base); assertCommit(commit);
+  const result = await run(root, ['diff', '--name-only', '-z', '--no-renames', base, commit]);
+  return result.stdout.split('\0').filter(path => path && !isSensitivePath(path));
+}
+
 export async function blameFile(root: string, commit: string, path: string, max: number) {
   assertCommit(commit);
   if (isSensitivePath(path) || /[*?]/.test(path)) throw new Error('Blame needs one literal, non-credential file path.');

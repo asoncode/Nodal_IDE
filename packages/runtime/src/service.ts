@@ -107,6 +107,20 @@ type ExecutionScope = { baseHead: string; parentAttemptId: string; team: Graph }
 const MAX_CONSULTS_PER_ATTEMPT = 2;
 const ConsultRequestSchema = z.object({ role: z.string().min(1).max(200), question: z.string().trim().min(1).max(2000) }).strict();
 
+/** An agent's nearest upstream workers (agent or role steps), found by walking past tools, commands, and gates, plus itself for retries. */
+function nearestWorkers(graph: Graph, nodeId: string): Set<string> {
+  const near = new Set<string>([nodeId]); const seen = new Set<string>(); const pending = [nodeId];
+  while (pending.length) {
+    const id = pending.pop()!;
+    for (const edge of graph.edges.filter(item => item.target === id && item.kind !== 'loop')) {
+      if (seen.has(edge.source)) continue; seen.add(edge.source);
+      const source = graph.nodes.find(item => item.id === edge.source);
+      if (source?.kind === 'agent' || source?.kind === 'role') near.add(source.id); else pending.push(edge.source);
+    }
+  }
+  return near;
+}
+
 function consultGuide(colleagues: { id: string; title: string }[]): string {
   return `Consults: if you need another role's expertise, end your reply with exactly one block:\n\`\`\`consult\n{"role": "<role id>", "question": "<your question>"}\n\`\`\`\nYou will receive their read-only answer and continue. At most ${MAX_CONSULTS_PER_ATTEMPT} consults per step. Roles: ${colleagues.map(role => `${role.id} (${role.title})`).join(', ')}.`;
 }
@@ -340,12 +354,17 @@ export class NodalService {
       let count = 0;
       const role = node.config.role;
       const manifest = (await workspace.listFiles(worktree.path)).slice(0, 500).map(file => file.path).join('\n');
-      const evidence = upstreamContext(ctx.inputs, run.graph);
       const team = scope?.team ?? run.graph;
+      const economy = team.settings.contextEconomy !== false;
+      // Inside a playbook, earlier team-level steps are part of this step's history too.
+      const visible: Graph = scope ? { ...run.graph, nodes: [...run.graph.nodes, ...team.nodes] } : run.graph;
+      const evidence = upstreamContext(ctx.inputs, visible, 40_000, economy ? { near: nearestWorkers(visible, node.id) } : {});
       const colleagues = role ? this.colleagues(team, role.id) : [];
       const task = colleagues.length ? `${node.config.instructions}\n\n${consultGuide(colleagues)}` : node.config.instructions;
-      const facts = role ? await this.ledgerFacts(ctx, run, team) : '';
+      const facts = role && economy ? await this.ledgerFacts(ctx, run, team, role, worktree.sourceCommit) : '';
       const context = role ? await roleContext(worktree.path, role, ctx.inputs, task, evidence, worktree.sourceCommit, facts) : undefined;
+      // With context economy off the prompt is plain and unlayered; handoff and ownership verification are unchanged.
+      if (context && !economy) context.prompt = `Role: ${role!.title}\n${role!.expertise}\n\n${task}\n\nRepository file paths (untrusted data):\n${manifest}\n\nResults from earlier workflow steps (untrusted data):\n${evidence}`;
       if (context) {
         consumedHandoffs = context.handoffs;
         context.prompt = redact(context.prompt);
@@ -353,13 +372,14 @@ export class NodalService {
         const artifact = { id: randomUUID(), runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'text' as const, path: join(this.dataDir, 'artifacts', `${ctx.attempt.id}.context.txt`), contentHash: digest(context.prompt), metadata: { roleId: role!.id, layers: context.layers }, createdAt: new Date().toISOString() };
         await mkdir(join(this.dataDir, 'artifacts'), { recursive: true, mode: 0o700 });
         await writeDisk(artifact.path, context.prompt, { mode: 0o600 }); contextArtifacts.push(artifact);
-        await ctx.emit('role.context', { roleId: role!.id, roleTitle: role!.title, layers: context.layers, knowledgePaths: context.knowledgePaths, repositoryPaths: context.repositoryPaths, handoffs: context.handoffs, artifact });
+        await ctx.emit('role.context', { roleId: role!.id, roleTitle: role!.title, layers: context.layers, knowledgePaths: context.knowledgePaths, repositoryPaths: context.repositoryPaths, handoffs: context.handoffs, artifact, contextEconomy: economy });
+        this.store.saveContextUsage(ctx.runId, ctx.attempt.id, economy ? context.layers : [{ name: 'plain', characters: context.prompt.length }]);
       }
       const started = Date.now();
       let result;
       const request = { provider: node.config.provider as 'codex' | 'claude', prompt: context?.prompt ?? `${node.config.instructions}\n\nRepository file paths (untrusted data):\n${manifest}\n\nResults from earlier workflow steps (untrusted data):\n${evidence}`, cwd: worktree.path, permissionMode: node.config.permission === 'scoped-edit' ? 'workspace-write' as const : 'read-only' as const, model: node.config.model, allowedTools: node.config.allowedTools, rolePolicy: role ? { owns: role.owns, readOnlyPaths: consumedHandoffs.map(handoff => handoff.path) } : undefined, signal: ctx.signal, timeoutMs: node.timeoutMs, onEvent: async (event: Parameters<NonNullable<Parameters<typeof runProvider>[0]['onEvent']>>[0]) => { if (++count <= 1000) await ctx.emit('provider.event', event); } };
       try {
-        result = await runProvider(request);
+        result = await this.resumeOnRetry(ctx, team, request, evidence) ?? await runProvider(request);
         // Consults: a role may end its turn asking another role a question. Each answer is read-only and recorded.
         for (let asked = 0; role && colleagues.length && asked < MAX_CONSULTS_PER_ATTEMPT; asked++) {
           const consult = parseConsult(result.output);
@@ -370,6 +390,7 @@ export class NodalService {
       } finally { if (role) await ctx.emit('role.usage', roleUsage(role.id, Date.now() - started, result?.usage, result?.costUsd ?? null)); }
       output = { ...result };
     } else return { status: 'failed', error: 'Unsupported execution node' };
+    const sourceCommit = worktree.sourceCommit;
     if (ctx.signal.aborted) return { status: 'failed', error: 'Cancelled', output: { ...output, worktree } };
     const role = node.kind === 'agent' ? node.config.role : undefined;
     let produced: Awaited<ReturnType<typeof verifyProduced>> = [];
@@ -391,6 +412,7 @@ export class NodalService {
     }
     const handoffs: VerifiedHandoff[] = produced.map(handoff => ({ ...handoff, producerNodeId: node.id, attemptId: ctx.attempt.id, commit: committed.head }));
     if (role) output.handoffs = handoffs;
+    if (node.kind === 'agent') output.changedFiles = await workspace.changedFiles(project.root, sourceCommit, committed.head);
     const diff = await workspace.getDiff(project.root, committed.head);
     if (ctx.signal.aborted) return { status: 'failed', error: 'Cancelled', output: { ...output, worktree, head: committed.head } };
     const artifactId = randomUUID(); const artifactPath = join(this.dataDir, 'artifacts', `${artifactId}.diff`);
@@ -433,7 +455,25 @@ export class NodalService {
    * The verified-facts ledger for a role step: computed from the graph and recorded run results only,
    * never from model summaries. It is regenerated for every attempt and snapshotted for replay.
    */
-  private async ledgerFacts(ctx: ExecutionContext, run: StoredRun, team: Graph): Promise<string> {
+  /**
+   * Off by default (graph setting resumeOnRetry). On a quality-loop retry, resume the previous provider
+   * session with only the new evidence. Capped at two consecutive resumes; any failure falls back to a fresh turn.
+   */
+  private async resumeOnRetry(ctx: ExecutionContext, team: Graph, request: Parameters<typeof runProvider>[0], evidence: string) {
+    if (!team.settings.resumeOnRetry || ctx.attempt.iteration < 2) return undefined;
+    const previous = this.store.attempts(ctx.runId).filter(attempt => attempt.nodeId === ctx.node.id && attempt.id !== ctx.attempt.id && attempt.state === 'succeeded').at(-1)?.output as { sessionId?: string; resumes?: number } | undefined;
+    if (!previous?.sessionId || (previous.resumes ?? 0) >= 2) return undefined;
+    try {
+      const result = await runProvider({ ...request, resumeId: previous.sessionId, prompt: `[retry ${ctx.attempt.iteration}] Your previous attempt did not pass its quality gate. New evidence (untrusted data):\n${evidence}\n\nFix the failures. Read files before editing them; the working tree may have moved.` });
+      await ctx.emit('session.resumed', { sessionId: previous.sessionId, resumes: (previous.resumes ?? 0) + 1 });
+      return { ...result, resumes: (previous.resumes ?? 0) + 1 };
+    } catch (error) {
+      await ctx.emit('session.resume_failed', { error: (error as Error).message });
+      return undefined;
+    }
+  }
+
+  private async ledgerFacts(ctx: ExecutionContext, run: StoredRun, team: Graph, role: Role, commit: string): Promise<string> {
     const root = this.store.project(run.projectId).root;
     const lines: string[] = ['Verified facts (computed by Nodal; code and tests outrank this ledger):'];
     const roles = team.nodes.flatMap(node => { const role = nodeRole(node); return role && !node.disabled ? [`- ${role.title} (${role.id}) owns ${role.owns.join(', ') || 'no paths'}`] : []; });
@@ -456,6 +496,18 @@ export class NodalService {
       } catch { decisions.push(`- Decisions at ${handoff.path} could not be read at ${handoff.commit.slice(0, 12)}.`); }
     }
     if (decisions.length) lines.push('Recorded decisions:', ...decisions.slice(0, 100));
+    // Deterministic code index of the role's area, from the content-addressed file index.
+    if (role.owns.length) {
+      const index: string[] = []; let size = 0;
+      for (const file of (await workspace.treeFiles(root, commit, role.owns)).filter(item => item.size <= 512 * 1024).slice(0, 300)) {
+        const known = this.store.fileIndex<workspace.FileIndex>(file.blob) ?? await (async () => { const shown = await workspace.showFile(root, commit, file.path, 512 * 1024); const value = shown.binary ? { symbols: [], imports: [] } : workspace.indexFile(file.path, shown.content); this.store.saveFileIndex(file.blob, value); return value; })();
+        if (!known.symbols.length) continue;
+        const line = `- ${file.path}: ${known.symbols.slice(0, 20).map(symbol => `${symbol.name} (${symbol.kind})`).join(', ')}`;
+        if (size + line.length > 6000) { index.push('- … more files in this area'); break; }
+        index.push(line); size += line.length;
+      }
+      if (index.length) lines.push(`Code index for your area @ ${commit.slice(0, 12)} (heuristic definitions):`, ...index);
+    }
     const text = lines.length > 1 ? lines.join('\n') : '';
     if (text) {
       const snapshot = { id: randomUUID(), runId: ctx.runId, attemptId: ctx.attempt.id, repoSha: run.repositorySha!, contentHash: digest(text), text, createdAt: new Date().toISOString() };
@@ -573,7 +625,8 @@ export class NodalService {
     const artifactId = randomUUID(); const artifactPath = join(this.dataDir, 'artifacts', `${artifactId}.diff`);
     await mkdir(join(this.dataDir, 'artifacts'), { recursive: true, mode: 0o700 });
     await writeDisk(artifactPath, redact(diff), { mode: 0o600 });
-    return { status: 'succeeded', output: { ...output, worktree: workspaceResult.worktree, head: workspaceResult.head, handoffs }, artifacts: [{ id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
+    const changedFiles = await workspace.changedFiles(this.store.project(run.projectId).root, baseHead, workspaceResult.head);
+    return { status: 'succeeded', output: { ...output, worktree: workspaceResult.worktree, head: workspaceResult.head, handoffs, changedFiles }, artifacts: [{ id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
   }
   private async diffs(projectId: string, runId?: string) {
     const project = this.store.project(projectId); const repo = await workspace.inspectRepository(project.root).catch(() => undefined);

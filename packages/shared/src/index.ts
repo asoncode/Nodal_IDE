@@ -137,6 +137,10 @@ export const GraphSchema = z.object({
     maxConcurrency: z.number().int().min(1).max(16).default(3),
     maxTotalAttempts: z.number().int().min(1).max(2000).default(100),
     timeoutMs: z.number().int().min(100).max(86_400_000).default(3_600_000),
+    /** Layered prompts, the verified-facts ledger, and ancestor digests. Off sends plain prompts; verification is identical. */
+    contextEconomy: z.boolean().optional(),
+    /** Resume an agent's provider session on quality-loop retries. Off unless enabled after comparison runs. */
+    resumeOnRetry: z.boolean().optional(),
   }).strict().default({ maxConcurrency: 3, maxTotalAttempts: 100, timeoutMs: 3_600_000 }),
 }).strict();
 export type Graph = z.infer<typeof GraphSchema>;

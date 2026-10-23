@@ -65,6 +65,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS ledger_snapshots(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), attempt_id TEXT NOT NULL, repo_sha TEXT NOT NULL, json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS consults_run ON consults(run_id);
       INSERT OR IGNORE INTO migrations VALUES(4,datetime('now'));
+      CREATE TABLE IF NOT EXISTS context_usage(attempt_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id), layer TEXT NOT NULL, characters INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(attempt_id, layer));
+      INSERT OR IGNORE INTO migrations VALUES(5,datetime('now'));
     `));
   }
   transaction<T>(action: () => T): T {
@@ -125,6 +127,13 @@ export class Store {
   consults(runId: string): Consult[] { this.run(runId); return this.many('SELECT json FROM consults WHERE run_id=? ORDER BY rowid', runId); }
   saveLedger(snapshot: LedgerSnapshot): void { this.db.prepare('INSERT INTO ledger_snapshots VALUES(?,?,?,?,?)').run(snapshot.id, snapshot.runId, snapshot.attemptId, snapshot.repoSha, json(snapshot)); }
   ledgers(runId: string): LedgerSnapshot[] { this.run(runId); return this.many('SELECT json FROM ledger_snapshots WHERE run_id=? ORDER BY rowid', runId); }
+  /** Context size by prompt layer. Characters, not tokens: providers report only whole-request token totals. */
+  saveContextUsage(runId: string, attemptId: string, layers: { name: string; characters: number }[]): void {
+    for (const layer of layers) this.db.prepare('INSERT OR REPLACE INTO context_usage VALUES(?,?,?,?,?)').run(attemptId, runId, layer.name, layer.characters, now());
+  }
+  contextUsage(runId: string): { attemptId: string; layer: string; characters: number }[] {
+    return (this.db.prepare('SELECT attempt_id AS attemptId, layer, characters FROM context_usage WHERE run_id=? ORDER BY rowid').all(runId) as { attemptId: string; layer: string; characters: number }[]);
+  }
   saveHandoff(runId: string, handoff: VerifiedHandoff): void { this.db.prepare('INSERT INTO handoffs VALUES(?,?,?,?) ON CONFLICT(run_id,attempt_id,name) DO UPDATE SET json=excluded.json').run(runId, handoff.attemptId, handoff.name, json(handoff)); }
   handoffs(runId: string): VerifiedHandoff[] { this.run(runId); return this.many('SELECT json FROM handoffs WHERE run_id=? ORDER BY rowid', runId); }
   saveGraph(projectId: string, graph: Graph): Graph {

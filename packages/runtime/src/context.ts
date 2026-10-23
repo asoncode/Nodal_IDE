@@ -13,12 +13,22 @@ const field = (value: unknown, key: string) => value && typeof value === 'object
  * are kept ahead of process logs, failing command output is kept ahead of passing output, and logs
  * keep their tail, so a long install log can no longer push the architecture plan out of context.
  */
-export function upstreamContext(inputs: Record<string, Result>, graph: Graph, budget = 40_000): string {
+export function upstreamContext(inputs: Record<string, Result>, graph: Graph, budget = 40_000, options: { near?: Set<string> } = {}): string {
   const sections = Object.entries(inputs).flatMap(([id, result]): Section[] => {
     const node = graph.nodes.find(item => item.id === id);
     if (!node) return [];
     const header = `## ${node.label} (${node.kind}): ${result.status ?? 'unknown'}${result.route ? `, route ${result.route}` : ''}${result.error ? `\nError: ${result.error}` : ''}`;
-    if (node.kind === 'agent' || node.kind === 'role') return [{ header: node.kind === 'role' ? `${header}\nRole: ${node.config.role.title}` : header, body: String(field(result.output, 'output') ?? ''), kind: 'agent' }];
+    if (node.kind === 'agent' || node.kind === 'role') {
+      const roleHeader = node.kind === 'role' ? `${header}\nRole: ${node.config.role.title}` : header;
+      const text = String(field(result.output, 'output') ?? '');
+      // Distant ancestors arrive as digests; full text stays retrievable with a step-output tool step.
+      if (options.near && !options.near.has(id)) {
+        const changed = field(result.output, 'changedFiles'); const handoffs = field(result.output, 'handoffs');
+        const digest = [Array.isArray(changed) ? `Changed files: ${changed.slice(0, 40).join(', ') || 'none'}` : '', Array.isArray(handoffs) && handoffs.length ? `Handoffs: ${handoffs.map(item => String(field(item, 'name'))).join(', ')}` : '', `Summary (digest of an earlier step; read its full output with a step-output tool for ${id}):\n${text.slice(0, 1200)}${text.length > 1200 ? '…' : ''}`].filter(Boolean).join('\n');
+        return [{ header: roleHeader, body: digest, kind: 'agent' }];
+      }
+      return [{ header: roleHeader, body: text, kind: 'agent' }];
+    }
     if (node.kind === 'tool') {
       const { tool, commit, ...rest } = (result.output ?? {}) as Record<string, unknown>;
       return [{ header: `${header}\nTool: ${String(tool ?? node.config.tool)} at ${String(commit ?? '').slice(0, 12)}`, body: JSON.stringify(rest), kind: 'tool' }];
