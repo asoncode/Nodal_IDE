@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { RoleSchema } from './roles.js';
+export { RoleSchema, RolePathSchema, roleOwnsPath, type Role, type VerifiedHandoff } from './roles.js';
 
 const IdSchema = z.string().min(1).max(200);
 export const NodeKindSchema = z.enum([
@@ -51,6 +53,7 @@ const AgentConfigSchema = z.object({
   provider: z.enum(['codex', 'claude', 'demo']).default('codex'),
   model: z.string().optional(),
   instructions: z.string().default(''),
+  role: RoleSchema.optional(),
   permission: z.enum(['read-only', 'scoped-edit']).default('read-only'),
   allowedTools: z.array(z.string()).default([]),
 }).strict();

@@ -13,10 +13,21 @@ It's an early, working version. The core editing and workflow features are in pl
 - **Build workflows visually.** Add agents, commands, conditions, parallel branches, test checks, bounded retry loops, and human approvals. Start with a template or build your own graph.
 - **Chat with Claude or Codex.** Open the chat sidebar for a repository conversation, or start a separate chat using a workflow agent’s context.
 - **Run Claude and Codex.** Give each agent its instructions and permissions, then review the request before it starts.
+- **Give agents specialist roles.** Configure expertise, reference files, owned paths, skills, and named handoffs. Save roles in the project library and reuse them without changing existing workflows.
 - **Review code before applying it.** Coding attempts run in separate Git worktrees. Inspect their diffs and explicitly approve changes before bringing them into your checkout.
 - **Keep track of what happened.** View streamed output, approvals, attempts, and saved run history. Replay a past run without executing it again.
 
 You can browse and edit any existing folder. Running a workflow requires opening the root of a Git repository with at least one commit.
+
+## Plan a specialist team
+
+Open **Generate**, describe the project, and select its brief files under **Project brief files**. Team planning is on by default. Nodal sends the selected briefs, a bounded file manifest, and your saved project roles to Claude to propose a team. Review or edit its roles, owned paths, handoffs, providers, and models before choosing **Approve team and generate workflow**. The next preview shows the graph; **Apply to canvas** changes the draft without starting a run.
+
+Each agent can use Claude or Codex and its own model. The planning request currently uses Claude because its adapter supports a tool-free planning turn. You can also configure roles in an agent's inspector, save them to the project library, or open **Team** to check file ownership. Library changes do not alter existing steps or active runs.
+
+During a run, Claude checks owned paths before edits; both adapters check the final changes before publishing an attempt. Required handoff files must exist and pass their declared JSON schema. Consumers receive verified handoffs, and replay records supplied context and available usage. These checks supplement provider permissions and do not create an operating-system sandbox.
+
+The **Specialist Team** template demonstrates contracts, parallel specialists, separate test gates, integration, independent review, and human approval. Adapt its paths and Node test commands to your repository before running it. This release uses ordinary agent nodes for specialists. Nested playbooks, automatic owner-routed repairs, consults, the supervising orchestrator, and the portable cross-project library are still planned; see [Known limitations](KNOWN_LIMITATIONS.md).
 
 ## Run from source
 
@@ -187,4 +198,4 @@ The browser E2E check uses the gstack browse CLI. Install it or set `NODAL_BROWS
 - [Operator guide](docs/OPERATOR_GUIDE.md) — using and troubleshooting the app.
 - [Known limitations](KNOWN_LIMITATIONS.md) — what's partial or still missing.
 
-Source code lives in `apps/desktop` and `packages/{shared,core,runtime,persistence,workspace,providers}`. The original build specification is kept in `FORGE_CODEX_BUILD_SPEC.md` as a historical reference; the application is named Nodal.
+Source code lives in `apps/desktop` and `packages/{shared,core,runtime,persistence,workspace,providers}`. The build specification is `FORGE_CODEX_BUILD_SPEC.md`, including the design for specialized agent teams in section 5A. "Forge" in that document refers to Nodal.

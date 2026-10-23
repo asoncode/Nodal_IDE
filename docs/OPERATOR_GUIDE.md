@@ -22,6 +22,28 @@ The local journal uses SQLite WAL. On startup, unfinished runs and active attemp
 
 Do not delete the SQLite WAL/SHM files while the app is running. Back up the data directory while stopped. Keep its contents private because prompts, code diffs, and outputs can contain confidential material.
 
+## Specialist roles and team planning
+
+In an agent inspector, expand the role editor, enter expertise and standards,
+reference paths, owned paths and skills, then apply the role to the step. Handoffs
+are JSON declarations with a name, literal file path and `required` flag;
+produced handoffs may include a JSON schema. Save the role to the project library
+to reuse it. Applying a saved role copies its current configuration into the
+draft. **Team** shows the ownership of files currently in the repository.
+
+In **Generate**, select brief files and leave team planning enabled. Review the
+proposed team JSON, including model assignments and planned areas, before
+approving workflow generation. Then inspect commands and permissions in the
+graph preview and apply it explicitly. Direct graph editing is available for
+incremental changes to an existing workflow.
+
+Use disjoint directory ownership for parallel roles. Ambiguous wildcard overlap
+is rejected conservatively; order those roles or narrow their paths. Every
+coding role needs a required test gate before completion. Missing contracts,
+invalid schemas, changed handoffs, or edits outside ownership fail the attempt;
+inspect the recorded policy evidence and preserved worktree. Changing a role's
+scope requires editing the draft and starting a new run.
+
 ## Troubleshooting
 
 | Symptom | Action |

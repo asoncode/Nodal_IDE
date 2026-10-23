@@ -1,3 +1,4 @@
+import { RoleSchema, type Role, type VerifiedHandoff } from '../../shared/src/roles.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -33,6 +34,8 @@ export class Store {
     this.transaction(() => this.db.exec(`
       CREATE TABLE IF NOT EXISTS migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, repository_root TEXT UNIQUE NOT NULL, json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS roles(project_id TEXT NOT NULL REFERENCES projects(id), id TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(project_id,id));
+      CREATE TABLE IF NOT EXISTS handoffs(run_id TEXT NOT NULL REFERENCES runs(id), attempt_id TEXT NOT NULL, name TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(run_id,attempt_id,name));
       CREATE TABLE IF NOT EXISTS graphs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS graph_revisions(id TEXT PRIMARY KEY, graph_id TEXT NOT NULL, content_hash TEXT NOT NULL, json TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), graph_revision_id TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL);
@@ -95,6 +98,14 @@ export class Store {
     const p: Project = existing ? { ...existing, branch, isGitRepository } : { id: randomUUID(), root, name, branch, isGitRepository, createdAt: now() };
     this.db.prepare('INSERT INTO projects VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(p.id, root, json(p)); return p;
   }
+  roles(projectId: string): Role[] { this.project(projectId); return this.many('SELECT json FROM roles WHERE project_id=? ORDER BY rowid', projectId); }
+  saveRole(projectId: string, input: Role): Role {
+    this.project(projectId); const role = RoleSchema.parse(input);
+    this.db.prepare('INSERT INTO roles VALUES(?,?,?) ON CONFLICT(project_id,id) DO UPDATE SET json=excluded.json').run(projectId, role.id, json(role)); return role;
+  }
+  deleteRole(projectId: string, roleId: string): void { this.project(projectId); this.db.prepare('DELETE FROM roles WHERE project_id=? AND id=?').run(projectId, roleId); }
+  saveHandoff(runId: string, handoff: VerifiedHandoff): void { this.db.prepare('INSERT INTO handoffs VALUES(?,?,?,?) ON CONFLICT(run_id,attempt_id,name) DO UPDATE SET json=excluded.json').run(runId, handoff.attemptId, handoff.name, json(handoff)); }
+  handoffs(runId: string): VerifiedHandoff[] { this.run(runId); return this.many('SELECT json FROM handoffs WHERE run_id=? ORDER BY rowid', runId); }
   saveGraph(projectId: string, graph: Graph): Graph {
     const existing = this.one<Graph>('SELECT json FROM graphs WHERE id=? AND project_id=?', graph.id, projectId);
     const owner = this.db.prepare('SELECT project_id FROM graphs WHERE id=?').get(graph.id) as { project_id: string } | undefined;

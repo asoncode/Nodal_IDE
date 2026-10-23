@@ -86,6 +86,31 @@ unfinished runs become interrupted; the runtime never guesses that an external
 effect completed. Resuming side-effecting work requires confirmation unless its
 idempotency has been established. The system makes no exactly-once claim.
 
+## Specialist teams
+
+An agent pins an inline role snapshot in its graph configuration. The project
+role library supplies reusable defaults; editing a library role never mutates a
+saved graph or an active run. A role separates expertise and skills from the
+step task, declares repository knowledge, owned paths, and produced/consumed
+handoffs. Ownership is checked before a successful attempt can publish code;
+Claude also checks file edits at tool time. These are application policies in
+addition to the provider sandbox, not a claim of OS-level isolation.
+
+Planning has two reviews: propose an editable team from selected repository
+briefs, the file manifest, and project roles; then generate a graph from that
+approved team. Both use short background start/poll requests, bounded correction,
+and tool-free planning. The generated graph cannot silently widen role scope or
+change an approved model assignment. Existing workflow edits can retain their
+original graph-generation path. Graph validation checks team handoff ordering,
+parallel ownership, and required machine-test gates as well as DAG wiring.
+
+Handoffs are repository artifacts validated before producer success and checked
+again in the consumer's code lineage. Prompt context is bounded and ordered;
+the replay records supplied context and reports unavailable provider usage as
+unknown. Session resume stays disabled. Later phases add deterministic tool
+nodes, nested role playbooks, supervised improvement proposals, and a portable
+cross-project library; these must not be represented by cosmetic controls.
+
 ## Verification boundary
 
 Core tests use injected deterministic callbacks, never paid providers. Workspace

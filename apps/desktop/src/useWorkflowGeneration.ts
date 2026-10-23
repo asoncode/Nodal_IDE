@@ -4,6 +4,7 @@ import type { Graph } from './model.js';
 import { GraphSchema } from '../../../packages/shared/src/index.js';
 import { validateGraph } from '../../../packages/core/src/index.js';
 import type { GenerationSnapshot } from '../../../packages/shared/src/generation.js';
+import { TeamPlanSchema, type PlanningOptions } from '../../../packages/shared/src/team.js';
 
 export type GeneratedWorkflow = NonNullable<GenerationSnapshot['result']>;
 type Job = { projectId: string; id?: string; cancelled: boolean; controller: AbortController; timer?: ReturnType<typeof setTimeout>; cancelPromise?: Promise<unknown> };
@@ -36,7 +37,7 @@ export function useWorkflowGeneration(projectId: string) {
     };
   }, [projectId]);
 
-  async function generate(graph: Graph, prompt: string) {
+  async function generate(graph: Graph, prompt: string, planning?: PlanningOptions) {
     if (active.current) return;
     const current = scope.current;
     const job: Job = { projectId, cancelled: false, controller: new AbortController() };
@@ -66,10 +67,11 @@ export function useWorkflowGeneration(projectId: string) {
         if (snapshot.status === 'cancelled') setProgress('Generation cancelled.');
         else {
           if (!snapshot.result) throw new Error('Generation completed without a workflow. Try again.');
+          if (planning?.stage === 'team') TeamPlanSchema.parse(snapshot.result.team);
           const parsed = GraphSchema.parse(snapshot.result.graph);
           const check = validateGraph(parsed);
           if (!check.valid) throw new Error(check.errors.map(issue => issue.message).join(' · '));
-          setGenerated({ ...snapshot.result, graph: parsed }); setProgress('Preview ready. Review it before applying.');
+          setGenerated({ ...snapshot.result, graph: parsed }); setProgress(planning?.stage === 'team' ? 'Team ready. Review roles before generating the workflow.' : 'Preview ready. Review it before applying.');
         }
         active.current = undefined; setBusy(false);
       } catch (error) {
@@ -81,7 +83,7 @@ export function useWorkflowGeneration(projectId: string) {
       }
     };
     try {
-      const snapshot = await api<GenerationSnapshot>('startGeneration', { projectId, graph, prompt, provider: 'claude' });
+      const snapshot = await api<GenerationSnapshot>('startGeneration', { projectId, graph, prompt, provider: 'claude', ...(planning ? { planning } : {}) });
       job.id = snapshot.id;
       if (!visible() || job.cancelled) { await finishCancellation(); return; }
       setProgress('Generating workflow… You can cancel while the provider is working.');

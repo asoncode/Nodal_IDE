@@ -54,7 +54,7 @@ beforeEach(() => {
       run: { id: 'run-1', projectId: project.id, graph, status: 'running', createdAt: new Date().toISOString() },
       inspectRun: { run: { id: 'run-1', projectId: project.id, graph, status: 'running', createdAt: new Date().toISOString() }, attempts: [], checkpoints: [], approvals: [{ id: 'approval-1', nodeId: 'command-1', decision: 'pending', message: 'Run node --version with your user privileges?', scope: { command: 'node', args: ['--version'] } }] },
       events: [{ eventId: 'event-1', sequence: 1, runId: 'run-1', nodeId: 'command-1', timestamp: new Date().toISOString(), kind: 'command.output', payload: { text: 'v24.0.0' } }],
-      approve: { accepted: true }, chats: [], closeTerminals: { closed: true },
+      approve: { accepted: true }, chatFiles: [], chats: [], closeTerminals: { closed: true },
     };
     if (!(method in results)) throw new Error(`Unexpected API call: ${method}`);
     return results[method] as T;
@@ -70,6 +70,37 @@ async function ready() {
 }
 
 describe('workspace flows', () => {
+  it('edits and saves a functional role snapshot on an agent step', async () => {
+    const agent = createNode('agent', 3); agent.id = 'ui-agent'; agent.label = 'Build interface';
+    graph.nodes.splice(1, 0, agent);
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Build interface' }));
+    fireEvent.change(screen.getByLabelText('Role title'), { target: { value: 'UI engineer' } });
+    fireEvent.change(screen.getByLabelText('Expertise and standards'), { target: { value: 'Build accessible interfaces.' } });
+    fireEvent.change(screen.getByLabelText('Owned paths (one per line)'), { target: { value: 'src/**' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply role to step' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls.some(call => call.method === 'saveGraph')).toBe(true));
+    const saved = calls.find(call => call.method === 'saveGraph')!.params.graph as Graph;
+    expect(saved.nodes.find(node => node.id === 'ui-agent')?.config).toMatchObject({ role: { title: 'UI engineer', expertise: 'Build accessible interfaces.', owns: ['src/**'] } });
+    expect(calls.some(call => call.method === 'listRoles')).toBe(false);
+  });
+
+  it('shows real ownership coverage for the current draft', async () => {
+    const agent = createNode('agent', 3); agent.id = 'ui-agent'; agent.label = 'Build interface';
+    if (agent.kind !== 'agent') throw new Error('Expected agent');
+    agent.config.permission = 'scoped-edit';
+    agent.config.role = { id: 'ui', title: 'UI engineer', expertise: 'Build interfaces.', knowledge: [], owns: ['src/**'], produces: [], consumes: [], skills: [] };
+    graph.nodes.splice(1, 0, agent);
+    workspaceFiles = ['src/example.ts', 'README.md'];
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Team' }));
+    expect(screen.getByText(/1 listed files without an editing owner/)).toBeTruthy();
+    expect(screen.getByText('README.md', { selector: 'code' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit role for Build interface' }));
+    expect(screen.getByLabelText('Role title')).toHaveProperty('value', 'UI engineer');
+  });
+
   it('saves node configuration through the real graph document contract', async () => {
     await ready();
     fireEvent.click(screen.getByRole('button', { name: 'Check Node' }));
@@ -220,6 +251,7 @@ describe('workspace flows', () => {
     await ready();
     fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
     const dialog = screen.getByRole('dialog', { name: 'Generate workflow' });
+    fireEvent.click(within(dialog).getByLabelText('Plan a specialist team first'));
     fireEvent.change(within(dialog).getByLabelText('What should this workflow do?'), { target: { value: 'Check Node version with approval' } });
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Generate preview' })).toHaveProperty('disabled', false));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Generate preview' }));

@@ -8,7 +8,7 @@ await cp('dist/runtime/main.js', join(destination, 'main.js'));
 await cp(process.execPath, join(destination, process.platform === 'win32' ? 'node.exe' : 'node'));
 await chmod(join(destination, process.platform === 'win32' ? 'node.exe' : 'node'), 0o755);
 const dependencies: Record<string, string> = {};
-for (const name of ['@openai/codex-sdk', '@anthropic-ai/claude-agent-sdk', 'zod', 'node-pty']) {
+for (const name of ['@openai/codex-sdk', '@anthropic-ai/claude-agent-sdk', 'zod', 'node-pty', 'ajv']) {
   const installed = JSON.parse(await readFile(`node_modules/${name}/package.json`, 'utf8')) as { version: string };
   dependencies[name] = installed.version;
 }

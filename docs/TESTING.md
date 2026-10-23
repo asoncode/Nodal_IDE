@@ -67,3 +67,20 @@ Browser E2E exercises actual rename, duplicate, delete, restore, folder creation
 Generation starts with a short `startGeneration` request, then the renderer polls the project-scoped `inspectGeneration` endpoint. Tests cover delayed completion, provider preflight, explicit application, missing login guidance, bounded retention/concurrency, cancellation and late replies, dialog unmount, and readable API transport errors. Provider tests verify copyable login commands quote paths safely. These checks use mocked model responses and do not consume provider usage.
 
 A disposable native WKWebView harness with the desktop `tauri://localhost` origin reproduced a response connection closing after approximately 61 seconds while a long generation-style HTTP request remained pending. In the same WebView, short start/poll requests completed a simulated preview after about 71 seconds, beyond the failing request’s cutoff. The harness uses a local fake provider rather than making a paid model request.
+
+## Specialist team checks
+
+Team planning tests send selected repository briefs to an explicitly mocked
+provider and verify that unselected contents, credentials, traversal and links
+are excluded. UI tests exercise team review, JSON edits, model approval,
+separate wiring jobs and final explicit application. The browser fixture follows
+that same two-stage flow without invoking a model.
+
+Core tests reject parallel ownership overlap, missing upstream contracts,
+generic coding steps in specialist teams and paths that bypass required test
+gates. Runtime tests use real Git repositories to check outside edits, ignored
+and untracked files, renames/deletions and provider-created commits. Handoff
+tests exercise required outputs, JSON schema failures and changed consumer
+artifacts. Claude hook tests check tool-time ownership and read-before-edit.
+Role-library tests check project boundaries and pinned snapshots. Unknown usage
+stays unknown; no token estimate is presented as provider telemetry.

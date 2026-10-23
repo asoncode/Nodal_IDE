@@ -1,4 +1,5 @@
-import { createNode, GraphSchema, type Graph, type NodeKind, type WorkflowEdge, type WorkflowNode } from '../../shared/src/index.js';
+import { createNode, GraphSchema, RoleSchema, type Graph, type NodeKind, type WorkflowEdge, type WorkflowNode } from '../../shared/src/index.js';
+import { withHandoffEdges } from './team.js';
 
 function node(id: string, kind: NodeKind, label: string, x: number, y = 180, config?: object): WorkflowNode {
   const result = createNode(kind, id, { x, y });
@@ -71,4 +72,41 @@ export const bugHunt = graph('bug-hunt', 'Bug Hunt', [
   edge('quality', 'approval', 'pass'), edge('approval', 'end'),
 ]);
 
-export const templates: Graph[] = [createCommandGraph(), featureBuilder, parallelFullstack, bugHunt];
+const contract = { name: 'system-contract', path: 'contracts/system-contract.json', required: true };
+const specialistBranches = [
+  { id: 'spatial', title: 'Spatial intelligence engineer', area: 'spatial', y: 20, expertise: 'Build spatial data structures and coordinate transforms. Preserve coordinate systems, units, and the published interfaces; test boundary cases.' },
+  { id: 'simulation', title: 'Simulation engineer', area: 'simulation', y: 240, expertise: 'Build deterministic simulation and causal models. Make assumptions explicit, preserve reproducibility, and test numerical and state-transition boundaries.' },
+  { id: 'ui', title: 'UI engineer', area: 'ui', y: 460, expertise: 'Build accessible UI components against published interfaces. Cover loading, empty, error, and interaction states with tests.' },
+];
+
+/** Flat specialist agents use the real scheduler and Node's test runner. Customize paths for the target project. */
+export const specialistTeam = withHandoffEdges(graph('specialist-team', 'Specialist Team', [
+  node('start', 'start', 'Start', 40),
+  node('research', 'agent', 'Researcher', 260, 180, { provider: 'claude', instructions: 'Read the project brief and repository. Report relevant prior art, constraints, and open questions for the architect.', role: RoleSchema.parse({ id: 'researcher', title: 'Researcher', expertise: 'Investigate evidence and distinguish facts from assumptions. Report sources and uncertainties; do not edit the repository.', knowledge: ['README.md'] }) }),
+  node('architect', 'agent', 'Architecture & contracts', 480, 180, { provider: 'claude', permission: 'scoped-edit', instructions: 'Use the research to write contracts/system-contract.json with interfaces and acceptance criteria. Write runnable Node test-runner tests at tests/contracts/*.test.js that validate the contract schema only; behavioral acceptance tests run after implementation. Specialists will implement against this contract. Do not edit their source areas.', role: RoleSchema.parse({ id: 'architect', title: 'Architect', expertise: 'Define coherent interface contracts and acceptance criteria before implementation. Own contract changes and document design assumptions in the contract.', knowledge: ['README.md'], owns: ['contracts/**', 'tests/contracts/**'], produces: [{ ...contract, schema: { type: 'object', required: ['interfaces', 'acceptance'], properties: { interfaces: { type: 'array', items: { type: 'string' } }, acceptance: { type: 'array', items: { type: 'string' } } }, additionalProperties: true } }], skills: ['Preserve published contract semantics when addressing failing tests.'] }) }),
+  node('contract-tests', 'command', 'Contract schema tests', 700, 180, { command: 'node', args: ['--test', 'tests/contracts/*.test.js'] }),
+  node('contract-gate', 'quality_gate', 'Contract gate', 920, 180, { predicate: { sourceNodeId: 'contract-tests', field: 'exitCode', operator: 'eq', value: 0 }, maxIterations: 3 }),
+  node('split', 'parallel', 'Parallel specialists', 1140),
+  ...specialistBranches.flatMap(branch => [
+    node(branch.id, 'agent', branch.title, 1360, branch.y, { provider: 'codex', permission: 'scoped-edit', instructions: `Implement the ${branch.area} portion against contracts/system-contract.json within your owned source and test directories. Write runnable Node test-runner unit tests at tests/${branch.area}/*.test.js that do not depend on unfinished specialist implementations. Read current files before editing. Use failed test evidence on retries; preserve the shared contract.`, role: RoleSchema.parse({ id: `${branch.id}-engineer`, title: branch.title, expertise: branch.expertise, knowledge: ['contracts/**'], owns: [`src/${branch.area}/**`, `tests/${branch.area}/**`], consumes: [contract], skills: ['Keep tests authoritative; never weaken acceptance criteria to make a failure disappear.'] }) }),
+    node(`${branch.id}-tests`, 'command', `${branch.title} unit tests`, 1580, branch.y, { command: 'node', args: ['--test', `tests/${branch.area}/*.test.js`] }),
+    node(`${branch.id}-gate`, 'quality_gate', `${branch.title} gate`, 1800, branch.y, { predicate: { sourceNodeId: `${branch.id}-tests`, field: 'exitCode', operator: 'eq', value: 0 }, maxIterations: 3 }),
+  ]),
+  node('join', 'join', 'Join tested specialists', 2020, 240),
+  node('merge', 'merge', 'Merge specialist branches', 2240, 240, { sourceNodeIds: specialistBranches.map(branch => branch.id) }),
+  node('integration', 'agent', 'Integration engineer', 2460, 240, { provider: 'claude', permission: 'scoped-edit', instructions: 'Inspect the merged implementation and add runnable Node test-runner integration and behavioral acceptance tests at tests/integration/*.test.js against the shared contract. Report defects in specialist-owned code with paths and evidence; do not edit their files or weaken the contract.', role: RoleSchema.parse({ id: 'integration-engineer', title: 'Integration engineer', expertise: 'Verify interactions between specialist components and provide reproducible failure evidence. Own integration tests, while implementation fixes remain with their owners.', knowledge: ['contracts/**'], owns: ['tests/integration/**'], consumes: [contract] }) }),
+  node('integration-tests', 'command', 'Integration and acceptance tests', 2680, 240, { command: 'node', args: ['--test', 'tests/integration/*.test.js'] }),
+  node('integration-gate', 'quality_gate', 'Integration gate', 2900, 240, { predicate: { sourceNodeId: 'integration-tests', field: 'exitCode', operator: 'eq', value: 0 } }),
+  node('review', 'agent', 'Independent reviewer', 3120, 240, { provider: 'claude', instructions: 'Review the integrated changes, contract, and test evidence. Report concrete defects without editing. End with exactly VERDICT: PASS or VERDICT: FAIL.', role: RoleSchema.parse({ id: 'independent-reviewer', title: 'Independent reviewer', expertise: 'Independently review correctness, security, and acceptance criteria. A passing opinion never replaces passing tests.', knowledge: ['contracts/**'], consumes: [contract] }) }),
+  node('review-gate', 'quality_gate', 'Independent review gate', 3340, 240, { predicate: { sourceNodeId: 'review', field: 'output', operator: 'contains', value: 'VERDICT: PASS' } }),
+  node('approval', 'approval', 'Approve integrated changes', 3560, 240),
+  node('end', 'end', 'End', 3780, 240),
+], [
+  edge('start', 'research'), edge('research', 'architect'), edge('architect', 'contract-tests'), edge('contract-tests', 'contract-gate'),
+  edge('contract-gate', 'architect', 'fail', 'loop'), edge('contract-gate', 'split', 'pass'),
+  ...specialistBranches.flatMap(branch => [edge('split', branch.id), edge(branch.id, `${branch.id}-tests`), edge(`${branch.id}-tests`, `${branch.id}-gate`), edge(`${branch.id}-gate`, branch.id, 'fail', 'loop'), edge(`${branch.id}-gate`, 'join', 'pass')]),
+  edge('join', 'merge'), edge('merge', 'integration'), edge('integration', 'integration-tests'), edge('integration-tests', 'integration-gate'),
+  edge('integration-gate', 'review', 'pass'), edge('review', 'review-gate'), edge('review-gate', 'approval', 'pass'), edge('approval', 'end'),
+]));
+
+export const templates: Graph[] = [createCommandGraph(), featureBuilder, parallelFullstack, bugHunt, specialistTeam];

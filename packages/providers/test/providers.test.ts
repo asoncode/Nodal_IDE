@@ -156,3 +156,26 @@ describe('provider policy and event adapters (SDK mocks, no network)', () => {
   });
 
 });
+
+describe('Claude role ownership hooks', () => {
+  it('requires a successful current read before editing and denies paths owned by another role', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'nodal-role-provider-'));
+    try {
+      await writeFile(path.join(root, 'owned.txt'), 'before'); await writeFile(path.join(root, 'other.txt'), 'other');
+      const options = claudeOptions({ provider: 'claude', cwd: root, prompt: 'edit', permissionMode: 'workspace-write', rolePolicy: { owns: ['owned.txt', 'new.txt'] }, approveCommand: async () => true }, new AbortController());
+      expect(options.tools).not.toContain('Bash');
+      const pre = options.hooks!.PreToolUse![0].hooks[0] as any, post = options.hooks!.PostToolUse![0].hooks[0] as any;
+      const event = (tool_name: string, file_path: string, hook_event_name = 'PreToolUse') => ({ hook_event_name, tool_name, tool_input: { file_path } });
+      expect(await pre(event('Edit', 'owned.txt'))).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: expect.stringContaining('Read the current') } });
+      expect(await pre(event('Read', 'owned.txt'))).toEqual({});
+      // Merely requesting Read does not authorize a write; the successful post hook is necessary.
+      expect(await pre(event('Edit', 'owned.txt'))).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+      await post(event('Read', 'owned.txt', 'PostToolUse'));
+      expect(await pre(event('Edit', 'owned.txt'))).toEqual({});
+      expect(await pre(event('Write', 'other.txt'))).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: expect.stringContaining('ownership') } });
+      expect(await pre(event('Write', 'new.txt'))).toEqual({});
+      await post(event('Read', 'owned.txt', 'PostToolUse')); await writeFile(path.join(root, 'owned.txt'), 'changed after read');
+      expect(await pre(event('Edit', 'owned.txt'))).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: expect.stringContaining('Read the current') } });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});

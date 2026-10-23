@@ -1,4 +1,5 @@
 import { GraphSchema, type Graph, type WorkflowEdge } from '../../shared/src/index.js';
+import { validateTeamGraph } from './team.js';
 
 export interface ValidationIssue {
   code: string;
@@ -143,6 +144,9 @@ export function validateGraph(input: unknown): ValidationResult {
       issue('ambiguous_loop_exit', 'A looping Quality Gate must use its loop edge as the only fail path.', edge.source);
     }
     const region = loopRegion(graph, edge);
+    // Publishing out of a loop is safe only when every control path to the consumer crosses this gate's pass edge.
+    const withoutPass = control.filter(item => item.source !== edge.source || item.sourcePort !== 'pass');
+    const bypassesPass = new Set(starts.flatMap(start => [...descendants(start.id, withoutPass)]));
     if (regions.some((previous) => [...region].some((id) => previous.has(id)))) {
       issue('overlapping_loops', 'Overlapping quality loops are not supported. Use independent bounded loops.', edge.source, edge.id);
     }
@@ -151,11 +155,13 @@ export function validateGraph(input: unknown): ValidationResult {
       if (node.kind === 'join' && node.config.mode === 'first_success') {
         issue('loop_early_join', 'A quality loop cannot contain a first_success join because other attempts may still be running.', id);
       }
-      if (ordinary.some((item) => item.source === id && !region.has(item.target) && id !== edge.source)) {
+      if (ordinary.some((item) => item.source === id && !region.has(item.target) && id !== edge.source &&
+        !(item.kind === 'artifact' && descendants(edge.source, control).has(item.target) && !bypassesPass.has(item.target)))) {
         issue('loop_escape', 'Nodes inside a quality loop must exit through its Quality Gate.', id);
       }
     }
     regions.push(region);
   }
+  errors.push(...validateTeamGraph(graph));
   return { valid: errors.length === 0, errors, graph };
 }

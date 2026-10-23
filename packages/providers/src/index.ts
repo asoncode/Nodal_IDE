@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module';
-import { access, lstat, realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { roleOwnsPath } from '../../shared/src/roles.js';
+import { access, lstat, realpath, readFile, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -22,6 +24,7 @@ export type AgentRunInput = {
   outputSchema?: Record<string, unknown>;
   allowedTools?: string[]; noTools?: boolean;
   allowNonGit?: boolean;
+  rolePolicy?: { owns: string[]; readOnlyPaths?: string[] };
   approveCommand?: (command: string, signal: AbortSignal) => Promise<boolean>;
   signal?: AbortSignal; onEvent?: (event: AgentEvent) => void | Promise<void>;
 };
@@ -161,7 +164,12 @@ export async function codexConfiguration(cwd: string, signal?: AbortSignal): Pro
 
 export function claudeOptions(input: AgentRunInput, controller: AbortController): Options {
   const writable = input.permissionMode === 'workspace-write';
-  const commands = writable && !!input.approveCommand;
+  const commands = writable && !!input.approveCommand && !input.rolePolicy;
+  const readHashes = new Map<string, string>();
+  const fileHash = async (file: string) => {
+    if ((await stat(file)).size > 2 * 1024 * 1024) throw new Error('Role edits require reading a file of at most 2 MiB.');
+    return createHash('sha256').update(await readFile(file)).digest('hex');
+  };
   const supported = writable ? ['Read', 'Edit', 'Write', ...(commands ? ['Bash'] : [])] : ['Read'];
   if (input.allowedTools?.some(tool => !supported.includes(tool))) throw new Error('Claude supports only Read, plus Edit/Write with scoped-edit permission.');
   const tools = input.noTools ? [] : input.allowedTools?.length ? [...input.allowedTools] : supported;
@@ -187,11 +195,35 @@ export function claudeOptions(input: AgentRunInput, controller: AbortController)
           if (typeof args.command !== 'string' || args.run_in_background || !input.approveCommand || controller.signal.aborted || !await input.approveCommand(args.command, controller.signal) || controller.signal.aborted) throw new Error('Command was not approved.');
           return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } };
         }
-        await validateToolPath(input.cwd, args.file_path ?? args.path, event.tool_name === 'Write');
+        const candidate = args.file_path ?? args.path;
+        await validateToolPath(input.cwd, candidate, event.tool_name === 'Write');
+        if (input.rolePolicy && ['Edit', 'Write'].includes(event.tool_name)) {
+          if (typeof candidate !== 'string') throw new Error('An explicit file path is required.');
+          const absolute = path.resolve(input.cwd, candidate);
+          const relative = path.relative(input.cwd, absolute).split(path.sep).join('/');
+          if (input.rolePolicy.readOnlyPaths?.includes(relative)) throw new Error('Consumed handoffs are read-only contracts.');
+          if (!roleOwnsPath(input.rolePolicy.owns, relative)) throw new Error('Edit is outside this role ownership.');
+          try {
+            const current = await fileHash(absolute);
+            if (readHashes.get(absolute) !== current) throw new Error('Read the current file before editing it.');
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || event.tool_name !== 'Write') throw error; }
+          readHashes.delete(absolute);
+        }
         return {};
       } catch (error) {
         return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: (error as Error).message } };
       }
+    }] }], PostToolUse: [{ hooks: [async event => {
+      if (!input.rolePolicy || event.hook_event_name !== 'PostToolUse' || event.tool_name !== 'Read') return {};
+      const args = event.tool_input as Record<string, unknown>;
+      const candidate = args.file_path ?? args.path;
+      if (typeof candidate !== 'string') return {};
+      try {
+        await validateToolPath(input.cwd, candidate);
+        const absolute = path.resolve(input.cwd, candidate);
+        readHashes.set(absolute, await fileHash(absolute));
+      } catch { /* A failed or stale read never authorizes an edit. */ }
+      return {};
     }] }] },
   };
 }

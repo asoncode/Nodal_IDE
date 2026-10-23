@@ -1,3 +1,5 @@
+import { RoleSchema, type Role, type VerifiedHandoff } from '../../shared/src/roles.js';
+import { enforceConsumedHandoffs, enforceOwnership, roleContext, roleUsage, validateRole, verifyProduced, verifyCommittedHandoffs } from './roles.js';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { mkdir, realpath, stat, writeFile as writeDisk } from 'node:fs/promises';
@@ -13,6 +15,9 @@ import { ChatRuntime } from './chat.js';
 import { upstreamContext } from './context.js';
 import { TerminalRuntime } from './terminals.js';
 import type { GenerationResult, GenerationSnapshot } from '../../shared/src/generation.js';
+import { PlanningOptionsSchema, TeamPlanSchema, type PlanningOptions } from '../../shared/src/team.js';
+import { planningContext, planningSchema, planningInstructions, assertApprovedTeam } from './planning.js';
+import { validateTeamPlan, withHandoffEdges } from '../../core/src/team.js';
 import type { CreateTerminalInput, TerminalOwner, TerminalScope } from '../../shared/src/terminal.js';
 import { CHAT_ATTACHMENT_LIMITS, isChatTextFilename, type ChatAttachmentInput, type CreateChatInput } from '../../shared/src/chat.js';
 // Writing a full workflow as schema-checked JSON took 60–90s per request in live runs; leave room for larger graphs.
@@ -64,6 +69,9 @@ const requestSchemas = {
   readFile: projectParams.extend({ path: z.string().min(1).max(4096) }),
   createFile: projectParams.extend({ path: z.string().min(1).max(4096) }),
   writeFile: projectParams.extend({ path: z.string().min(1).max(4096), content: z.string().max(2 * 1024 * 1024), expectedHash: z.string().length(64) }),
+  listRoles: projectParams,
+  saveRole: projectParams.extend({ role: RoleSchema }),
+  deleteRole: projectParams.extend({ roleId: id }),
   listGraphs: projectParams,
   saveGraph: projectParams.extend({ graph: GraphSchema }),
   run: projectParams.extend({ graph: GraphSchema }),
@@ -72,8 +80,8 @@ const requestSchemas = {
   events: runParams.extend({ after: z.number().int().min(0).default(0) }),
   approve: runParams.extend({ nodeId: id, approved: z.boolean() }),
   diff: projectParams.extend({ runId: id.optional() }),
-  generateGraph: projectParams.extend({ graph: GraphSchema, prompt: z.string().min(1).max(20000), provider: z.enum(['codex','claude']) }),
-  startGeneration: projectParams.extend({ graph: GraphSchema, prompt: z.string().trim().min(1).max(20000), provider: z.enum(['codex','claude']) }),
+  generateGraph: projectParams.extend({ graph: GraphSchema, prompt: z.string().min(1).max(20000), provider: z.enum(['codex','claude']), planning: PlanningOptionsSchema.optional() }),
+  startGeneration: projectParams.extend({ graph: GraphSchema, prompt: z.string().trim().min(1).max(20000), provider: z.enum(['codex','claude']), planning: PlanningOptionsSchema.optional() }),
   inspectGeneration: projectParams.extend({ generationId: id }),
   cancelGeneration: projectParams.extend({ generationId: id }),
   applyChanges: runParams.extend({ nodeId: id, expectedHead: id, expectedSourceHead: id, approved: z.literal(true) }),
@@ -153,11 +161,14 @@ export class NodalService {
         const result = await workspace.writeFile(this.store.project(projectId).root, params.path as string, params.content as string, params.expectedHash as string);
         return { ...result, content: params.content, path: params.path };
       }
+      case 'listRoles': return this.store.roles(projectId);
+      case 'saveRole': return this.store.saveRole(projectId, validateRole(params.role as Role));
+      case 'deleteRole': this.store.deleteRole(projectId, params.roleId as string); return { deleted: true };
       case 'listGraphs': return this.store.graphs(projectId);
       case 'saveGraph': return this.store.saveGraph(projectId, params.graph as Graph);
       case 'run': return this.startRun(projectId, params.graph as Graph);
       case 'runs': return this.store.runs(projectId);
-      case 'inspectRun': return { run: this.store.run(runId), attempts: this.store.attempts(runId), approvals: this.store.approvals(runId), checkpoints: this.store.checkpoints(runId) };
+      case 'inspectRun': return { run: this.store.run(runId), attempts: this.store.attempts(runId), approvals: this.store.approvals(runId), checkpoints: this.store.checkpoints(runId), handoffs: this.store.handoffs(runId) };
       case 'events': this.store.run(runId); return this.store.events(runId, params.after as number);
       case 'pause': await this.engine(runId).pause(); return this.store.run(runId);
       case 'resume': await this.engine(runId).resume(); return this.store.run(runId);
@@ -182,8 +193,8 @@ export class NodalService {
         this.record(runId, 'workspace.integration', { ...merged, nodeId: params.nodeId });
         return merged;
       }
-      case 'generateGraph': return this.generateGraph(projectId, params.graph as Graph, params.prompt as string, params.provider as 'codex' | 'claude');
-      case 'startGeneration': return this.startGeneration(projectId, params.graph as Graph, params.prompt as string, params.provider as 'codex' | 'claude');
+      case 'generateGraph': return this.generateGraph(projectId, params.graph as Graph, params.prompt as string, params.provider as 'codex' | 'claude', params.planning as PlanningOptions | undefined);
+      case 'startGeneration': return this.startGeneration(projectId, params.graph as Graph, params.prompt as string, params.provider as 'codex' | 'claude', params.planning as PlanningOptions | undefined);
       case 'inspectGeneration': return structuredClone(this.generationJob(projectId, params.generationId as string).snapshot);
       case 'cancelGeneration': return this.cancelGeneration(projectId, params.generationId as string);
       default: throw new Error('Unsupported method');
@@ -194,6 +205,7 @@ export class NodalService {
     const validation = validateGraph(input);
     if (!validation.valid) throw new Error(validation.errors.map(e => e.message).join('\n'));
     const graph = structuredClone(validation.graph!);
+    for (const node of graph.nodes) if (node.kind === 'agent' && node.config.role) validateRole(node.config.role);
     if (JSON.stringify(redact(graph)) !== JSON.stringify(graph)) throw new Error('Graph appears to contain credentials. Use official provider authentication; do not put secrets in commands or prompts.');
     const repo = await workspace.inspectRepository(this.store.project(projectId).root).catch(() => { throw new Error('Workflows require the root of a Git repository with an initial commit. You can still browse and edit this folder.'); });
     const runId = randomUUID();
@@ -250,9 +262,9 @@ export class NodalService {
       if (seen.has(id)) return; seen.add(id);
       const value = ctx.inputs[id]?.output as WorkspaceResult | undefined;
       if (value?.worktree && value.head) { found.set(value.head, value); return; }
-      for (const e of run.graph.edges.filter(e => e.target === id && e.kind !== 'loop')) walk(e.source);
+      for (const e of run.graph.edges.filter(e => e.target === id && e.kind === 'control')) walk(e.source);
     };
-    for (const e of run.graph.edges.filter(e => e.target === ctx.node.id && e.kind !== 'loop')) walk(e.source);
+    for (const e of run.graph.edges.filter(e => e.target === ctx.node.id && e.kind === 'control')) walk(e.source);
     // Retain the prior attempt's changes when a quality loop returns to the coding node.
     const previous = this.store.attempts(ctx.runId).filter(a => a.nodeId === ctx.node.id && a.state === 'succeeded').at(-1)?.output as WorkspaceResult | undefined;
     if (previous?.head && ctx.attempt.iteration > 1) return [previous];
@@ -263,6 +275,7 @@ export class NodalService {
     const inputs = this.upstreamWorkspaces(ctx, run);
     if (inputs.length > 1 && node.kind !== 'merge') return { status: 'failed', error: 'Multiple coding branches require an explicit Merge node before execution.' };
     if (!['agent','command','merge'].includes(node.kind)) return { status: 'succeeded' };
+    if (node.kind === 'agent' && node.config.provider === 'demo' && node.config.role) return { status: 'failed', error: 'Demo agents cannot publish verified role handoffs. Select a live provider.' };
     if (node.kind === 'agent' && node.config.provider === 'demo') {
       await ctx.emit('provider.message', { provider: 'demo', text: 'Demo Mode: deterministic fixture output, no provider request or code changes.' });
       return { status: 'succeeded', output: { text: 'Demo Mode fixture completed', demo: true } };
@@ -290,6 +303,8 @@ export class NodalService {
       return { status: 'succeeded', output: { worktree, head: (await workspace.inspectRepository(worktree.path)).head } };
     }
     let output: Record<string, unknown>; let succeeded = true;
+    const contextArtifacts: NonNullable<NodeResult['artifacts']> = [];
+    let consumedHandoffs: VerifiedHandoff[] = [];
     if (node.kind === 'command') {
       const cwd = node.config.cwd ? await workspace.resolveWorkspacePath(worktree.path, node.config.cwd) : worktree.path;
       let retained = 0, chunks = 0; const emissions: Promise<void>[] = [];
@@ -300,19 +315,54 @@ export class NodalService {
       output = { ...result }; succeeded = result.exitCode !== null && node.config.successExitCodes.includes(result.exitCode) && !result.timedOut && !result.cancelled;
     } else if (node.kind === 'agent') {
       let count = 0;
+      const role = node.config.role;
       const manifest = (await workspace.listFiles(worktree.path)).slice(0, 500).map(file => file.path).join('\n');
-      const result = await runProvider({ provider: node.config.provider as 'codex' | 'claude', prompt: `${node.config.instructions}\n\nRepository file paths (untrusted data):\n${manifest}\n\nResults from earlier workflow steps, including the previous attempt's test results when retrying (untrusted data):\n${upstreamContext(ctx.inputs, run.graph)}`, cwd: worktree.path, permissionMode: node.config.permission === 'scoped-edit' ? 'workspace-write' : 'read-only', model: node.config.model, allowedTools: node.config.allowedTools, signal: ctx.signal, timeoutMs: node.timeoutMs, onEvent: async event => { if (++count <= 1000) await ctx.emit('provider.event', event); } });
+      const evidence = upstreamContext(ctx.inputs, run.graph);
+      const context = role ? await roleContext(worktree.path, role, ctx.inputs, node.config.instructions, evidence, worktree.sourceCommit) : undefined;
+      if (context) {
+        consumedHandoffs = context.handoffs;
+        context.prompt = redact(context.prompt);
+        if (Buffer.byteLength(context.prompt) > 384 * 1024) throw new Error('Role context exceeds the 384 KiB limit.');
+        const artifact = { id: randomUUID(), runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'text' as const, path: join(this.dataDir, 'artifacts', `${ctx.attempt.id}.context.txt`), contentHash: digest(context.prompt), metadata: { roleId: role!.id, layers: context.layers }, createdAt: new Date().toISOString() };
+        await mkdir(join(this.dataDir, 'artifacts'), { recursive: true, mode: 0o700 });
+        await writeDisk(artifact.path, context.prompt, { mode: 0o600 }); contextArtifacts.push(artifact);
+        await ctx.emit('role.context', { roleId: role!.id, roleTitle: role!.title, layers: context.layers, knowledgePaths: context.knowledgePaths, repositoryPaths: context.repositoryPaths, handoffs: context.handoffs, artifact });
+      }
+      const started = Date.now();
+      let result;
+      try {
+        result = await runProvider({ provider: node.config.provider as 'codex' | 'claude', prompt: context?.prompt ?? `${node.config.instructions}\n\nRepository file paths (untrusted data):\n${manifest}\n\nResults from earlier workflow steps (untrusted data):\n${evidence}`, cwd: worktree.path, permissionMode: node.config.permission === 'scoped-edit' ? 'workspace-write' : 'read-only', model: node.config.model, allowedTools: node.config.allowedTools, rolePolicy: role ? { owns: role.owns, readOnlyPaths: consumedHandoffs.map(handoff => handoff.path) } : undefined, signal: ctx.signal, timeoutMs: node.timeoutMs, onEvent: async event => { if (++count <= 1000) await ctx.emit('provider.event', event); } });
+      } finally { if (role) await ctx.emit('role.usage', roleUsage(role.id, Date.now() - started, result?.usage, result?.costUsd ?? null)); }
       output = { ...result };
     } else return { status: 'failed', error: 'Unsupported execution node' };
     if (ctx.signal.aborted) return { status: 'failed', error: 'Cancelled', output: { ...output, worktree } };
+    const role = node.kind === 'agent' ? node.config.role : undefined;
+    let produced: Awaited<ReturnType<typeof verifyProduced>> = [];
+    if (role) {
+      try { await enforceOwnership(worktree.path, worktree.sourceCommit, role); await enforceConsumedHandoffs(worktree.path, consumedHandoffs); produced = await verifyProduced(worktree.path, role); }
+      catch (error) {
+        const message = (error as Error).message;
+        await ctx.emit('role.policy_violation', { roleId: role.id, error: message });
+        return { status: 'failed', error: message, output: { ...output, worktree }, artifacts: contextArtifacts };
+      }
+    }
     const committed = await workspace.commitAttempt(worktree);
     if (ctx.signal.aborted) return { status: 'failed', error: 'Cancelled', output: { ...output, worktree, head: committed.head } };
+    try { await verifyCommittedHandoffs(worktree.path, committed.head, produced); }
+    catch (error) {
+      const message = (error as Error).message;
+      await ctx.emit('role.policy_violation', { roleId: role?.id, error: message });
+      return { status: 'failed', error: message, output: { ...output, worktree }, artifacts: contextArtifacts };
+    }
+    const handoffs: VerifiedHandoff[] = produced.map(handoff => ({ ...handoff, producerNodeId: node.id, attemptId: ctx.attempt.id, commit: committed.head }));
+    if (role) output.handoffs = handoffs;
     const diff = await workspace.getDiff(project.root, committed.head);
     if (ctx.signal.aborted) return { status: 'failed', error: 'Cancelled', output: { ...output, worktree, head: committed.head } };
     const artifactId = randomUUID(); const artifactPath = join(this.dataDir, 'artifacts', `${artifactId}.diff`);
     await mkdir(join(this.dataDir, 'artifacts'), { recursive: true, mode: 0o700 });
     await writeDisk(artifactPath, redact(diff), { mode: 0o600 });
-    return { status: succeeded ? 'succeeded' : 'failed', error: succeeded ? undefined : 'Command did not pass its required exit status.', output: { ...output, worktree, head: committed.head }, artifacts: [{ id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
+    for (const handoff of handoffs) { this.store.saveHandoff(ctx.runId, handoff); await ctx.emit('handoff.verified', handoff); }
+    return { status: succeeded ? 'succeeded' : 'failed', error: succeeded ? undefined : 'Command did not pass its required exit status.', output: { ...output, worktree, head: committed.head }, artifacts: [...contextArtifacts, { id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
   }
   private async diffs(projectId: string, runId?: string) {
     const project = this.store.project(projectId); const repo = await workspace.inspectRepository(project.root).catch(() => undefined);
@@ -335,7 +385,7 @@ export class NodalService {
     if (!job || job.snapshot.projectId !== projectId) throw new Error('Generation not found for this project.');
     return job;
   }
-  private startGeneration(projectId: string, graph: Graph, prompt: string, provider: 'codex' | 'claude'): GenerationSnapshot {
+  private startGeneration(projectId: string, graph: Graph, prompt: string, provider: 'codex' | 'claude', planning?: PlanningOptions): GenerationSnapshot {
     this.store.project(projectId);
     if (this.closed) throw new Error('Runtime is closing.');
     if ([...this.generationJobs.values()].some(job => job.snapshot.projectId === projectId && job.snapshot.status === 'running')) throw new Error('This project already has a generation in progress. Wait for it to finish or cancel it before trying again.');
@@ -343,7 +393,7 @@ export class NodalService {
     const controller = new AbortController();
     const snapshot: GenerationSnapshot = { id: randomUUID(), projectId, provider, status: 'running', createdAt: new Date().toISOString() };
     this.generationJobs.set(snapshot.id, { snapshot, controller });
-    void this.generateGraph(projectId, graph, prompt, provider, controller).then(result => {
+    void this.generateGraph(projectId, graph, prompt, provider, planning, controller).then(result => {
       if (controller.signal.aborted || snapshot.status !== 'running') return;
       snapshot.status = 'succeeded'; snapshot.result = result; snapshot.finishedAt = new Date().toISOString();
     }).catch(error => {
@@ -361,7 +411,7 @@ export class NodalService {
     }
     return structuredClone(snapshot);
   }
-  private async generateGraph(projectId: string, current: Graph, prompt: string, provider: 'codex' | 'claude', controller = new AbortController()): Promise<GenerationResult> {
+  private async generateGraph(projectId: string, current: Graph, prompt: string, provider: 'codex' | 'claude', planning?: PlanningOptions, controller = new AbortController()): Promise<GenerationResult> {
     this.store.project(projectId);
     if (this.closed) throw new Error('Runtime is closing.');
     this.generation.add(controller);
@@ -371,16 +421,30 @@ export class NodalService {
       if (!status.available) throw new Error(`${provider === 'claude' ? 'Claude' : 'Codex'} is unavailable. ${status.message} No model request was made.`);
       if (status.authentication === 'missing') throw new Error(`Sign in with ${status.loginCommand ?? (provider === 'claude' ? 'claude auth login' : 'codex login')}, then try again. ${status.message} No model request was made.`);
       const cwd = join(this.dataDir, 'planner'); await mkdir(cwd, { recursive: true, mode: 0o700 });
-      const schema = z.toJSONSchema(GraphSchema, { unrepresentable: 'any', target: 'draft-7' });
-      let instruction = `Return ONLY JSON matching this schema: ${JSON.stringify(schema)}. Build a Nodal workflow, never execute commands or modify files. Preserve unrelated nodes and positions. ${PLANNING_RULES}\nUse explicit command approvals and read-only provider permissions by default. Current graph: ${JSON.stringify(current)}\nUser request: ${prompt}`;
+      if (planning?.team) {
+        const issues = validateTeamPlan(planning.team);
+        if (issues.length) throw new Error(issues.map(issue => issue.message).join('; '));
+      }
+      const context = await planningContext(this.store.project(projectId).root, planning?.briefPaths ?? [], this.store.roles(projectId));
+      controller.signal.throwIfAborted();
+      const schema = planningSchema(planning);
+      let instruction = `${planningInstructions(current, prompt, PLANNING_RULES, context, planning)}\nSchema: ${JSON.stringify(schema)}`;
       for (let attempt = 1; attempt <= 2; attempt++) {
         controller.signal.throwIfAborted();
         const response = await runProvider({ provider, prompt: instruction, cwd, permissionMode: 'read-only', signal: controller.signal, timeoutMs: PLANNING_TIMEOUT_MS, noTools: true, outputSchema: schema, maxTurns: 6 });
         controller.signal.throwIfAborted();
         try {
           const text = response.output.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-          const parsed: unknown = JSON.parse(text); const check = validateGraph(parsed);
+          const parsed: unknown = JSON.parse(text);
+          if (planning?.stage === 'team') {
+            const team = TeamPlanSchema.parse(parsed);
+            const issues = validateTeamPlan(team);
+            if (issues.length) throw new Error(issues.map(issue => issue.message).join('; '));
+            return { graph: current, team, summary: team.summary, attempts: attempt };
+          }
+          const check = validateGraph(withHandoffEdges(GraphSchema.parse(parsed)));
           if (!check.valid) throw new Error(check.errors.map(e => e.message).join('; '));
+          if (planning?.team) assertApprovedTeam(check.graph!, planning.team);
           return { graph: check.graph!, summary: `${check.graph!.nodes.length} nodes, concurrency ${check.graph!.settings.maxConcurrency}, up to ${check.graph!.settings.maxTotalAttempts} attempts. Review every command and permission before applying.`, attempts: attempt };
         } catch (error) { instruction = `Correct this invalid graph response; return JSON only. Error: ${String(error)}\n${instruction}\nInvalid response: ${response.output.slice(0,30000)}`; }
       }

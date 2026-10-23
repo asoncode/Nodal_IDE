@@ -5,7 +5,9 @@ import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import type { ChatSession } from '../packages/shared/src/chat.js';
 import type { GenerationSnapshot } from '../packages/shared/src/generation.js';
-import { GraphSchema } from '../packages/shared/src/index.js';
+import { GraphSchema, type Graph } from '../packages/shared/src/index.js';
+import { PlanningOptionsSchema, TeamPlanSchema, type PlanningOptions } from '../packages/shared/src/team.js';
+import { validateTeamPlan } from '../packages/core/src/team.js';
 import { validateGraph } from '../packages/core/src/index.js';
 import { createCommandGraph } from '../packages/core/src/templates.js';
 import { preview } from 'vite';
@@ -46,7 +48,12 @@ const service=new NodalService(store,data);
 const dispatch=service.dispatch.bind(service);
 const fixtureGraph=GraphSchema.parse({ ...createCommandGraph(), name:'Simulated generation fixture' });
 assert(validateGraph(fixtureGraph).valid,'Simulated generation fixture must be a valid graph');
-const generationFixtures=new Map<string,{ snapshot:GenerationSnapshot; startedAt:number }>();
+const fixtureTeam=TeamPlanSchema.parse({ name:'Simulated specialist team', summary:'Focused implementation owners for the fixture.', members:[
+  { role:{ id:'interface',title:'Interface engineer',expertise:'Build accessible UI.',knowledge:[],owns:['apps/ui/**'],produces:[],consumes:[],skills:[] },provider:'claude',permission:'scoped-edit' },
+  { role:{ id:'core',title:'Core engineer',expertise:'Build tested core logic.',knowledge:[],owns:['packages/core/**'],produces:[],consumes:[],skills:[] },provider:'codex',permission:'scoped-edit' },
+],areas:[{path:'apps/ui/**',roleId:'interface'},{path:'packages/core/**',roleId:'core'}] });
+assert.deepEqual(validateTeamPlan(fixtureTeam),[],'Simulated specialist team must pass team validation');
+const generationFixtures=new Map<string,{ snapshot:GenerationSnapshot; startedAt:number; graph:Graph; planning:PlanningOptions }>();
 const fixtureLoginCommand='"/simulated/nodal/bundled/claude" auth login';
 let fixtureAuthMissing=false, fixtureStarts=0;
 service.dispatch=async(method,raw)=>{
@@ -56,10 +63,12 @@ service.dispatch=async(method,raw)=>{
   ];
   if(method==='generateGraph') throw new Error('The E2E generation fixture requires short start/inspect requests; paid model calls are disabled.');
   if(method==='startGeneration') {
-    const input=raw as { projectId:string; provider:string; prompt:string };
+    const input=raw as { projectId:string; provider:string; prompt:string; graph:unknown; planning:unknown };
     assert.equal(input.provider,'claude'); assert(input.prompt.trim()); assert(!fixtureAuthMissing);
+    const planning=PlanningOptionsSchema.parse(input.planning);
+    if(planning.stage==='workflow') { assert(planning.team,'Workflow wiring requires a reviewed team'); assert.deepEqual(validateTeamPlan(planning.team),[]); }
     const snapshot:GenerationSnapshot={id:`simulated-generation-${++fixtureStarts}`,projectId:input.projectId,provider:'claude',status:'running',createdAt:new Date().toISOString()};
-    generationFixtures.set(snapshot.id,{snapshot,startedAt:Date.now()});
+    generationFixtures.set(snapshot.id,{snapshot,startedAt:Date.now(),graph:GraphSchema.parse(input.graph),planning:structuredClone(planning)});
     return structuredClone(snapshot);
   }
   if(method==='inspectGeneration'||method==='cancelGeneration') {
@@ -71,7 +80,9 @@ service.dispatch=async(method,raw)=>{
     }
     if(method==='inspectGeneration'&&fixture.snapshot.status==='running'&&Date.now()-fixture.startedAt>=1200) {
       fixture.snapshot.status='succeeded'; fixture.snapshot.finishedAt=new Date().toISOString();
-      fixture.snapshot.result={graph:fixtureGraph,summary:'Simulated generation fixture: review before applying.',attempts:1};
+      fixture.snapshot.result=fixture.planning.stage==='team'
+        ? {graph:fixture.graph,team:structuredClone(fixtureTeam),summary:'Review the simulated specialist team before wiring.',attempts:1}
+        : {graph:fixtureGraph,summary:'Simulated generation fixture: review before applying.',attempts:1};
     }
     return structuredClone(fixture.snapshot);
   }
@@ -132,8 +143,24 @@ try {
   assert((await browse('text')).includes('Generating workflow'),'Delayed simulated generation did not show progress');
   assert.equal(fixtureStarts,1,'Generation started more than once');
   assert.equal((await browse('js','document.querySelector(".generated-preview") !== null')).trim(),'false','Generation preview appeared before the delayed fixture completed');
-  await browse('wait','.generated-preview:has-text("Simulated generation fixture")');
+  await browse('wait','.generated-preview:has-text("Simulated specialist team")');
   assert.equal(generationFixtures.get('simulated-generation-1')?.snapshot.status,'succeeded');
+  assert.equal(generationFixtures.get('simulated-generation-1')?.planning.stage,'team');
+  assert.deepEqual(store.graphs(project.id),graphsBeforeGeneration,'Team proposal persisted a graph before review');
+  assert.equal(store.runs(project.id).length,runsBeforeGeneration,'Team proposal executed a workflow');
+  assert.equal((await browse('js','document.querySelectorAll(".react-flow__node").length')).trim(),'4','Team proposal changed the draft canvas');
+  assert.equal((await browse('js',`document.querySelector('[aria-label="Generate workflow"] .dialog-actions .primary').disabled`)).trim(),'true','A team proposal must not be applied as a workflow');
+  const reviewedTeam=structuredClone(fixtureTeam); reviewedTeam.members[0].model='simulated-review-model';
+  await browse('fill','label.field:has-text("Review and edit team") textarea',JSON.stringify(reviewedTeam,null,2));
+  await browse('click','[aria-label="Generate workflow"] button:has-text("Approve team and generate workflow")');
+  await eventually(async()=>fixtureStarts===2,'Approved team did not start a separate workflow job');
+  const wiring=generationFixtures.get('simulated-generation-2'); assert(wiring);
+  assert.equal(wiring.planning.stage,'workflow');
+  assert.deepEqual(wiring.planning.team,reviewedTeam,'Workflow wiring ignored the reviewed model/role snapshot');
+  assert.equal((await browse('js',`document.querySelector('[aria-label="Generate workflow"] .dialog-actions .primary').disabled`)).trim(),'true','Workflow can be applied while wiring is pending');
+  assert.deepEqual(store.graphs(project.id),graphsBeforeGeneration,'Wiring persisted a graph before explicit application');
+  await browse('wait','.generated-preview:has-text("Simulated generation fixture")');
+  assert.equal(wiring.snapshot.status,'succeeded');
   assert.deepEqual(store.graphs(project.id),graphsBeforeGeneration,'Preview persisted a graph before explicit application');
   assert.equal(store.runs(project.id).length,runsBeforeGeneration,'Preview executed a workflow');
   assert.equal((await browse('js',`document.querySelector('[aria-label="Generate workflow"] .dialog-actions .primary').disabled`)).trim(),'false','Validated fixture preview cannot be applied explicitly');
@@ -154,18 +181,18 @@ try {
   await browse('click','[aria-label="Generate workflow"] button:has-text("Refresh")');
   await eventually(async()=> (await browse('js',`Array.from(document.querySelectorAll('[aria-label="Generate workflow"] button')).find(button=>button.textContent==="Generate preview").disabled`)).trim()==='false','Generation stayed disabled after simulated sign-in refresh');
   await browse('click','[aria-label="Generate workflow"] button:has-text("Generate preview")');
-  await eventually(async()=>fixtureStarts===2,'Second simulated generation did not start');
+  await eventually(async()=>fixtureStarts===3,'Cancellation fixture did not start');
   await browse('click','[aria-label="Generate workflow"] button:has-text("Cancel generation")');
-  await eventually(async()=>generationFixtures.get('simulated-generation-2')?.snapshot.status==='cancelled','Cancel did not stop the same remote fixture');
+  await eventually(async()=>generationFixtures.get('simulated-generation-3')?.snapshot.status==='cancelled','Cancel did not stop the same remote fixture');
   await eventually(async()=> (await browse('text')).includes('Generation cancelled.'),'Cancellation was not visible');
   await new Promise(resolveDelay=>setTimeout(resolveDelay,1400));
-  assert.equal(generationFixtures.get('simulated-generation-2')?.snapshot.status,'cancelled','Cancelled fixture changed status after its completion delay');
+  assert.equal(generationFixtures.get('simulated-generation-3')?.snapshot.status,'cancelled','Cancelled fixture changed status after its completion delay');
   assert.equal((await browse('js','document.querySelector(".generated-preview") !== null')).trim(),'false','A cancelled generation displayed a late preview');
   assert.equal((await browse('js',`document.querySelector('[aria-label="Generate workflow"] textarea').value`)).trim(),generationPrompt,'Cancellation lost the generation prompt');
   assert.deepEqual(store.graphs(project.id),graphsBeforeGeneration,'Generation cancellation changed the saved graph');
   assert.equal(store.runs(project.id).length,runsBeforeGeneration,'Generation cancellation started a workflow');
   await browse('click','[aria-label="Generate workflow"] button[aria-label="Close dialog"]');
-  console.log('PASS simulated generation fixture: CLI accounts/login refresh, delayed HTTP polling, explicit-apply boundary, cancellation, preserved prompt (no model request)');
+  console.log('PASS simulated generation fixture: CLI accounts/login refresh, team review/model edit, separate workflow job, delayed HTTP polling, explicit-apply boundary, cancellation, preserved prompt (no model request)');
 
   await browse('click','.run-button');
   await eventually(async()=>store.runs(project.id).length===1,'Run did not start');

@@ -5,6 +5,7 @@ import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, 
 import { api } from './api.js';
 import ChatPanel from './ChatPanel.js';
 import GenerationPanel from './GenerationPanel.js';
+import RoleEditor, { RoleLibrary, RoleRunDetails } from './RoleEditor.js';
 import ExplorerPanel from './ExplorerPanel.js';
 import SearchPanel from './SearchPanel.js';
 import QuickPick from './QuickPick.js';
@@ -13,11 +14,11 @@ import TerminalPanel, { type TerminalPanelHandle } from './TerminalPanel.js';
 import { MessageSquare } from 'lucide-react';
 import { isDesktop, pickFolder, restoreLastProject, listenDesktopActions } from './desktop.js';
 import { createNode, emptyGraph, NODE_LABELS, language, type Graph, type GraphNode, type NodeKind, type Project, type Provider, type Run, type Event, type Inspection, type FileBuffer } from './model.js';
-import { GraphSchema } from '../../../packages/shared/src/index.js';
+import { GraphSchema, roleOwnsPath } from '../../../packages/shared/src/index.js';
 import { validateGraph } from '../../../packages/core/src/index.js';
 
 type Tab = 'graph' | 'code' | 'diff' | 'replay';
-type View = 'explorer' | 'search' | 'workflows' | 'runs' | 'providers';
+type View = 'explorer' | 'search' | 'workflows' | 'team' | 'runs' | 'providers';
 type Diff = { diff: string; branch: string; worktrees: { nodeId: string; path: string; branch: string; diff: string; head: string; sourceHead: string; dirty: boolean }[] };
 const kinds = Object.keys(NODE_LABELS) as NodeKind[];
 const stringify = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
@@ -34,6 +35,7 @@ function WorkflowNodeView({ data, selected }: { data: { node: GraphNode; status:
     {node.kind !== 'start' && <Handle type="target" position={Position.Left} id="in"/>}
     <div className="wf-node-kind"><Icon size={12}/><span>{NODE_LABELS[node.kind]}</span><span className={`state-dot ${status}`} role="img" aria-label={status.replaceAll('_', ' ')} title={status.replaceAll('_', ' ')}/></div>
     <div className="wf-node-label">{node.label}</div>
+    {node.kind === 'agent' && node.config.role && <div className="role-badge" title={node.config.role.expertise}>{node.config.role.title}</div>}
     {detail && <div className="wf-node-detail">{detail}</div>}
     {node.kind !== 'end' && ports.map((port, index) => <Handle key={port} type="source" position={Position.Right} id={port} title={port} style={{ top: `${(index + 1) * 100 / (ports.length + 1)}%` }}>{ports.length > 1 && <span className="port-label">{port}</span>}</Handle>)}
   </div>;
@@ -351,6 +353,10 @@ export default function App() {
   };
   const selectRun = (run: Run) => { setRunId(run.id); setInspection(undefined); setTab('replay'); setMessage(`Recorded run · ${run.id.slice(0, 8)}`); };
   const validation = useMemo(() => validateGraph(graph), [graph]);
+  const ownershipCoverage = useMemo(() => {
+    const roles = graph.nodes.flatMap(node => node.kind === 'agent' && !node.disabled && node.config.permission === 'scoped-edit' && node.config.role ? [{ nodeId: node.id, role: node.config.role }] : []);
+    return files.map(path => ({ path, owners: roles.filter(item => roleOwnsPath(item.role.owns, path)) }));
+  }, [graph, files]);
   const startRun = () => void act(async () => {
     if (!project) { setModal('project'); return; }
     if (project.isGitRepository === false) throw new Error('Workflows require a Git repository with an initial commit. You can still browse and edit this folder.');
@@ -419,7 +425,7 @@ export default function App() {
 
     <div className="workbench">
       <nav className="activity-bar" aria-label="Views">
-        {([{ id: 'explorer', label: 'Explorer', icon: Files }, { id: 'workflows', label: 'Workflows', icon: Workflow }, { id: 'runs', label: 'Runs', icon: History }, { id: 'providers', label: 'Providers', icon: Plug }] as const).map(item => <button key={item.id} className={layout.sidebar && view === item.id ? 'active' : ''} title={item.label} aria-label={item.label} onClick={() => showView(item.id)}><item.icon size={22} strokeWidth={1.5}/></button>)}
+        {([{ id: 'explorer', label: 'Explorer', icon: Files }, { id: 'workflows', label: 'Workflows', icon: Workflow }, { id: 'team', label: 'Team', icon: Bot }, { id: 'runs', label: 'Runs', icon: History }, { id: 'providers', label: 'Providers', icon: Plug }] as const).map(item => <button key={item.id} className={layout.sidebar && view === item.id ? 'active' : ''} title={item.label} aria-label={item.label} onClick={() => showView(item.id)}><item.icon size={22} strokeWidth={1.5}/></button>)}
         <button className={tab === 'diff' ? 'active' : ''} title="Source control" aria-label="Source control" onClick={refreshDiff}><GitCompare size={22} strokeWidth={1.5}/></button>
         <button className={chatOpen ? 'active' : ''} title="Agent chat" aria-label="Agent chat" onClick={() => setChatOpen(old => !old)}><MessageSquare size={22} strokeWidth={1.5}/></button>
       </nav>
@@ -446,6 +452,19 @@ export default function App() {
               {!graphs.length && <p className="sidebar-hint">Saved workflows appear here.</p>}
               <div className="section-header"><ChevronDown size={14}/><span>Templates</span></div>
               {templates.map(template => <button key={template.id} className="sidebar-item" title="Open as a new draft" onClick={() => applyTemplate(template)}><Workflow size={14}/><span>{template.name}</span></button>)}
+            </div>
+          </>}
+          {view === 'team' && <>
+            <div className="view-title"><span>Team ownership</span></div>
+            <div className="sidebar-scroll team-overview">
+              <p className="field-help">Roles and ownership in the current workflow draft. Select a step to edit its role.</p>
+              {graph.nodes.filter(node => node.kind === 'agent' && !node.disabled).map(node => node.kind === 'agent' && <button key={node.id} className="team-role" aria-label={`Edit role for ${node.label}`} onClick={() => { setSelectedId(node.id); setSelectedEdge(undefined); setChatOpen(false); setLayout(old => ({ ...old, inspector: true })); setTab('graph'); }}><strong>{node.config.role?.title ?? 'Role missing'}</strong><span>{node.label}</span><code>{node.config.role?.owns.join('\n') || (node.config.permission === 'scoped-edit' ? 'Coverage gap: no owned paths' : 'Read only')}</code></button>)}
+              {!graph.nodes.some(node => node.kind === 'agent' && !node.disabled) && <p className="field-help">Add an agent step to assign a role.</p>}
+              <div className="inspector-group">Repository coverage</div>
+              <p className="field-help">{ownershipCoverage.filter(item => !item.owners.length).length} listed files without an editing owner · {ownershipCoverage.filter(item => item.owners.length > 1).length} with multiple editing steps. Sequential steps may share ownership.</p>
+              <details><summary>Unassigned files</summary>{ownershipCoverage.filter(item => !item.owners.length).slice(0, 30).map(item => <code className="ownership-file" key={item.path}>{item.path}</code>)}{ownershipCoverage.filter(item => !item.owners.length).length > 30 && <p className="field-help">Showing the first 30 files.</p>}</details>
+              <p className="field-help">Coverage uses the current file listing, not planned files.</p>
+              {project && <RoleLibrary key={project.id} projectId={project.id}/>}
             </div>
           </>}
           {view === 'runs' && <>
@@ -560,6 +579,7 @@ export default function App() {
             {selected.kind === 'agent' && selected.config.provider !== 'demo' && <button className="secondary block" onClick={() => { setChatContextRequest(old => ({ nodeId: selected.id, version: (old?.version ?? 0) + 1 })); setChatOpen(true); }}><MessageSquare size={13}/>Chat with this agent</button>}
             <Field label="Name"><input value={selected.label} onChange={event => changeNode({ label: event.target.value })}/></Field>
             {selected.kind === 'agent' && <><Field label="Provider"><select value={selected.config.provider} onChange={event => changeConfig({ provider: event.target.value })}><option value="codex">OpenAI Codex</option><option value="claude">Claude</option><option value="demo">Demo — deterministic test fixture</option></select></Field><Field label="Model (optional)"><input value={selected.config.model ?? ''} placeholder="Provider default" onChange={event => changeConfig({ model: event.target.value || undefined })}/></Field><Field label="Instructions"><textarea rows={7} placeholder="Describe the task and acceptance criteria…" value={selected.config.instructions} onChange={event => changeConfig({ instructions: event.target.value })}/></Field><Field label="Workspace permission"><select value={selected.config.permission} onChange={event => changeConfig({ permission: event.target.value })}><option value="read-only">Read only</option><option value="scoped-edit">Scoped edit in isolated worktree</option></select></Field></>}
+            {selected.kind === 'agent' && <><div className="inspector-group">Functional role · step override</div><RoleEditor key={selected.id} value={selected.config.role} onChange={role => changeConfig({ role })}/>{project && <RoleLibrary key={`${project.id}:${selected.id}`} projectId={project.id} role={selected.config.role} onApply={role => changeConfig({ role })}/>}</>}
             {selected.kind === 'command' && <><Field label="Executable"><input value={selected.config.command} onChange={event => changeConfig({ command: event.target.value })}/></Field><Field label="Arguments (one per line)"><textarea rows={4} value={selected.config.args.join('\n')} onChange={event => changeConfig({ args: event.target.value.split('\n').filter(Boolean) })}/></Field><p className="field-help">Arguments are passed directly. Shell syntax is not expanded. Command execution requires approval.</p></>}
             {selected.kind === 'approval' && <Field label="Review instructions"><textarea rows={5} value={selected.config.message} onChange={event => changeConfig({ message: event.target.value })}/></Field>}
             {selected.kind === 'join' && <Field label="Wait for"><select value={selected.config.mode} onChange={event => changeConfig({ mode: event.target.value })}><option value="all_success">All branches succeed</option><option value="all_settled">All branches settle</option><option value="first_success">First successful branch</option></select></Field>}
@@ -570,6 +590,7 @@ export default function App() {
             <label className="check-field"><input type="checkbox" checked={selected.disabled} onChange={event => changeNode({ disabled: event.target.checked })}/>Disable this node</label>
             <details><summary>Advanced configuration JSON</summary><textarea className="config-json" rows={10} value={configText} onChange={event => setConfigText(event.target.value)}/>{configError && <p className="inline-error">{configError}</p>}<button className="secondary" onClick={() => { try { const parsed = GraphSchema.parse({ ...graph, nodes: graph.nodes.map(node => node.id === selected.id ? { ...node, config: JSON.parse(configText) } : node) }); edit(parsed); setConfigError(''); } catch (cause) { setConfigError(String(cause)); } }}>Apply configuration</button></details>
             <div className="node-actions"><button className="secondary" onClick={() => { clipboard.current = []; duplicate(); }}><Copy size={13}/>Duplicate</button><button className="secondary danger" onClick={deleteSelection}><Trash2 size={13}/>Delete</button></div>
+            <RoleRunDetails events={events.filter(event => event.nodeId === selected.id)}/>
             {inspection?.attempts.some(attempt => attempt.nodeId === selected.id) && <div className="inspector-group">Attempts</div>}
             {inspection?.attempts.filter(attempt => attempt.nodeId === selected.id).map(attempt => <div key={attempt.id} className="attempt-card"><div><span className={`state-dot ${attempt.state}`}/>Attempt {attempt.attemptIndex ?? 1} · {attempt.state.replaceAll('_', ' ')}</div><pre>{stringify(attempt.output ?? attempt.error ?? 'No output recorded')}</pre>{attempt.worktreePath && <small>{attempt.worktreePath}</small>}</div>)}
           </> : edge ? <>

@@ -347,3 +347,20 @@ input[type=checkbox], input[type=range] { accent-color: var(--gold); }
 .folder-welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--fg-muted); }
 .folder-welcome h2 { margin: 0; color: var(--fg-strong); font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
 .folder-welcome p { margin: 0; font-size: 13px; }
+
+/* Functional roles share the inspector's controls and keep ownership visible in the graph. */
+.role-badge { margin: 7px 0 2px; padding: 3px 6px; border-left: 2px solid var(--gold); background: var(--gold-soft); color: var(--fg-strong); font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
+.role-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.role-editor details { margin: 10px 0; }
+.role-library { margin-top: 18px; }
+.role-library-item { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.role-library-item > strong, .role-library-item > small { display: block; overflow-wrap: anywhere; }
+.role-library-item > small { margin-top: 4px; color: var(--fg-muted); }
+.team-overview { padding: 12px; }
+.team-role { display: flex; width: 100%; flex-direction: column; align-items: flex-start; text-align: left; gap: 5px; padding: 12px 0; border-bottom: 1px solid var(--border); white-space: normal; }
+.team-role:hover { background: var(--bg-hover); }
+.team-role span { font-size: 11px; color: var(--fg-muted); }
+.team-role code { font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--gold); }
+.ownership-file { display: block; margin: 5px 0; color: var(--fg-muted); font-size: 10px; overflow-wrap: anywhere; }
+.role-run-details details { margin: 8px 0; }
+.role-run-details pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; max-height: 240px; overflow: auto; }
