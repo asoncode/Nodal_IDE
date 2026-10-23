@@ -157,8 +157,10 @@ export default function App() {
     if (terminalCount.current) return window.confirm(`Stop this window's ${terminalCount.current} terminal${terminalCount.current === 1 ? '' : 's'}${unsaved ? ', discard unsaved edits,' : ''} and open another folder?`);
     return !unsaved || window.confirm('Discard unsaved edits and open another folder?');
   }, []);
-  const loadProject = useCallback(async (selectedProject: Project, discardConfirmed = false) => {
+  const loadProject = useCallback(async (requested: Project, discardConfirmed = false) => {
     if (!discardConfirmed && !confirmFolderSwitch()) return false;
+    // A folder saved as "not a repository" is re-checked, since Git may have been initialized since.
+    const selectedProject = requested.isGitRepository === false ? await api<Project>('openProject', { path: requested.root }).catch(() => requested) : requested;
     const generation = ++projectGeneration.current; setExplorerRequest(undefined); setLocation(undefined); setProblems({}); setFileOperationPending(false); closedFiles.current = [];
     const [nextFiles, nextGraphs, nextRuns] = await Promise.all([api<string[]>('files', { projectId: selectedProject.id }), api<Graph[]>('listGraphs', { projectId: selectedProject.id }), api<Run[]>('runs', { projectId: selectedProject.id })]);
     if (generation !== projectGeneration.current) return false;
@@ -351,7 +353,12 @@ export default function App() {
   }, [graph, files]);
   const startRun = () => void act(async () => {
     if (!project) { setModal('project'); return; }
-    if (project.isGitRepository === false) throw new Error('Workflows require a Git repository with an initial commit. You can still browse and edit this folder.');
+    if (project.isGitRepository === false) {
+      // The folder may have become a repository (git init, first commit) since it was opened.
+      const refreshed = await api<Project>('openProject', { path: project.root });
+      if (refreshed.isGitRepository === false) throw new Error('Workflows require a Git repository with an initial commit. You can still browse and edit this folder.');
+      projectRef.current = refreshed; setProject(refreshed); setProjects(items => items.map(item => item.id === refreshed.id ? refreshed : item));
+    }
     if (!validation.valid) throw new Error(validation.errors.map(issue => issue.message).join(' · '));
     const run = await api<Run>('run', { projectId: project.id, graph }); setRunId(run.id); setInspection(undefined); setRuns(items => [run, ...items]); setDock('events'); setLayout(old => ({ ...old, panel: true })); setMessage('Run started. Workflow snapshot is pinned; edits create a draft.');
   });

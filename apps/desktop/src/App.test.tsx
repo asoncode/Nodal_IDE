@@ -251,6 +251,24 @@ describe('workspace flows', () => {
     expect(screen.queryByRole('textbox', { name: 'New file path' })).toBeNull();
   });
 
+  it('re-checks a folder saved as not a repository, so a later git init lets workflows run', async () => {
+    const implementation = vi.mocked(api).getMockImplementation()!;
+    let initialized = false;
+    vi.mocked(api).mockImplementation(async (method, params) => {
+      if (method === 'bootstrap') return { projects: [{ ...project, isGitRepository: false }], templates: [], providers: [] } as never;
+      if (method === 'openProject' && (params as { path?: string })?.path === project.root) { calls.push({ method, params: params as Record<string, unknown> }); return { ...project, isGitRepository: initialized } as never; }
+      return implementation(method, params);
+    });
+    render(<App/>);
+    await waitFor(() => expect(calls.some(call => call.method === 'listGraphs')).toBe(true));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run workflow' })).toHaveProperty('disabled', false));
+    expect(calls.filter(call => call.method === 'openProject')).toHaveLength(1); // re-checked on load
+    initialized = true; // The user runs git init and commits while Nodal is open.
+    fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }));
+    await waitFor(() => expect(calls.some(call => call.method === 'run')).toBe(true));
+    expect(screen.queryByText(/Workflows require a Git repository/)).toBeNull();
+  });
+
   it('shows runtime events and requires an explicit decision for command approval', async () => {
     await ready();
     fireEvent.click(screen.getByRole('button', { name: 'Run workflow' }));
