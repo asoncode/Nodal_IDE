@@ -20,9 +20,18 @@ export interface ExecutionContext {
   signal: AbortSignal;
   emit: (kind: string, payload: unknown) => Promise<void>;
 }
+export interface RouteRequest {
+  gate: WorkflowNode;
+  result: NodeResult;
+  /** Loop targets the gate can send the failure back to. */
+  candidates: string[];
+  inputs: Record<string, NodeResult>;
+}
 export interface EngineOptions {
   runId?: string;
   execute: (context: ExecutionContext) => Promise<NodeResult>;
+  /** Chooses which loop targets re-run for an owner-routed gate. Unknown or empty choices use the fallback. */
+  routeFailure?: (request: RouteRequest) => Promise<string[]>;
   onEvent?: (event: ExecutionEvent) => Promise<void> | void;
 }
 
@@ -380,18 +389,23 @@ export class WorkflowEngine {
       }
     }
     if (!this.cancelled && !this.fatalError && node.kind === 'quality_gate' && final.route === 'fail') {
-      const loop = this.graph.edges.find((edge) => edge.source === node.id && edge.kind === 'loop');
+      const loops = this.graph.edges.filter((edge) => edge.source === node.id && edge.kind === 'loop');
+      const loop = loops[0];
       if (loop && this.iterations.get(node.id)! < node.config.maxIterations) {
-        const region = loopRegion(this.graph, loop);
+        const chosen = await this.routeTargets(node, final, loops);
+        const regions = chosen.map((edge) => loopRegion(this.graph, edge));
+        const region = new Set(regions.flatMap((item) => [...item]));
         const iteration = this.iterations.get(node.id)! + 1;
-        this.loopFeedback.set(loop.target, clone(Object.fromEntries([...this.results].filter(([nodeId]) => region.has(nodeId)))));
+        for (const [index, edge] of chosen.entries()) {
+          this.loopFeedback.set(edge.target, clone(Object.fromEntries([...this.results].filter(([nodeId]) => regions[index]!.has(nodeId)))));
+        }
         for (const nodeId of region) {
           this.iterations.set(nodeId, iteration);
           this.results.delete(nodeId);
           this.run.nodeStates[nodeId] = 'pending';
         }
         for (const nodeId of region) await this.emit('node.state', { state: 'pending' }, nodeId);
-        await this.emit('loop.iteration', { iteration, maxIterations: node.config.maxIterations, target: loop.target }, node.id);
+        await this.emit('loop.iteration', { iteration, maxIterations: node.config.maxIterations, target: chosen[0]!.target, targets: chosen.map((edge) => edge.target) }, node.id);
       } else if (loop) {
         await this.setState(node.id, 'failed');
         const error = `Quality loop reached its limit of ${node.config.maxIterations} iterations.`;
@@ -403,6 +417,20 @@ export class WorkflowEngine {
         await this.emit('loop.exhausted', { iteration: this.iterations.get(node.id), error, attempt }, node.id, attempt.id);
       }
     }
+  }
+
+  /** Single-target gates always loop to their one target. Owner-routed gates ask the router and fall back safely. */
+  private async routeTargets(gate: WorkflowNode, result: NodeResult, loops: WorkflowEdge[]): Promise<WorkflowEdge[]> {
+    if (gate.kind !== 'quality_gate' || gate.config.routing !== 'owner' || loops.length < 2) return [loops[0]!];
+    const fallback = loops.find((edge) => edge.target === gate.config.fallbackTargetId) ?? loops[0]!;
+    let chosen: WorkflowEdge[] = [];
+    try {
+      const targets = await this.options.routeFailure?.({ gate: clone(gate), result: clone(result), candidates: loops.map((edge) => edge.target), inputs: this.inputs(gate.id) }) ?? [];
+      chosen = loops.filter((edge) => targets.includes(edge.target));
+    } catch (error) {
+      await this.emit('loop.route_error', { error: message(error) }, gate.id);
+    }
+    return chosen.length ? chosen : [fallback];
   }
 
   private async retryDelay(delayMs: number): Promise<void> {

@@ -4,8 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { mkdir, realpath, stat, writeFile as writeDisk } from 'node:fs/promises';
 import { z } from 'zod';
-import { GraphSchema, type Graph, type ExecutionEvent, type ApprovalRequest } from '../../shared/src/index.js';
-import { WorkflowEngine, type ExecutionContext, type NodeResult } from '../../core/src/engine.js';
+import { GraphSchema, nodeRole, roleOwnsPath, type Graph, type ExecutionEvent, type ApprovalRequest } from '../../shared/src/index.js';
+import { WorkflowEngine, type ExecutionContext, type NodeResult, type RouteRequest } from '../../core/src/engine.js';
 import { validateGraph } from '../../core/src/validation.js';
 import { featureBuilder, templates } from '../../core/src/templates.js';
 import { Store, digest, redact, type StoredRun } from '../../persistence/src/index.js';
@@ -41,6 +41,8 @@ Design guidance:
 - Parallelize independent work (for example backend and frontend after a shared plan): fan out from a "parallel" node to one agent per branch, give each branch its own test command and quality gate loop, send each gate's "pass" edge to a "join" (mode "all_success"), then a "merge" node whose config.sourceNodeIds lists the branch agents. Later coding or command steps must come after that merge; a step cannot start from two code branches.
 - Deterministic tool steps need no model and no approval: {"kind":"tool","config":{"tool":"search","query":"...","paths":["src"]}}. Tools: search (query, regex, caseSensitive), symbols (name), read (paths), list, git (mode log|diff|blame), test-impact, validate (path, optional JSON schema), step-output (nodeId of an earlier step). Results expose "count" (and "valid" for validate), so a gate can check {"field":"count","operator":"eq","value":0}. Use a tool step whenever no judgment is needed: search before an agent reads, validate contracts instead of asking a reviewer.
 - Represent each specialist as a role node: {"kind":"role","config":{"role":<role>,"playbook":{"nodes":[...],"edges":[...]}}}. The playbook is the role's internal workflow with its own start and end, using only start, end, agent, command, tool, condition, and quality_gate steps on one code lineage. Inner agents work as the role, so they never set their own "role". Give each coding role an inner test command and quality_gate loop back to its implementing agent, plus an orienting tool step first. The team level then shows only roles, gates, merges, reviews, and approvals.
+- When several specialists feed one integration or review gate, route its failures to owners: config "routing": "owner", one {"kind":"loop","sourcePort":"fail"} edge to each specialist that could be at fault, and "fallbackTargetId" naming the integration role for failures no file path attributes.
+- An architecture role records its decisions as a produced handoff named "decisions" (JSON {"decisions":[{"decision": "...", "rationale": "...", "assumptions": [...]}]}); later roles see them in their verified ledger. Roles may consult each other at runtime, so do not add steps just to ask questions.
 - A review that can send work back goes after the test gates: a scoped-edit agent that addresses review findings (on the first pass it does final polish), then a read-only reviewer whose instructions end with "Reply with a final line VERDICT: PASS or VERDICT: FAIL", then a quality_gate with config.predicate = {"sourceNodeId": "<reviewer id>", "field": "output", "operator": "contains", "value": "VERDICT: PASS"} whose fail loop returns to the addressing agent. Test gates stay the authority; the review gate adds to them.
 Valid example with a bounded loop: ${JSON.stringify(featureBuilder)}`;
 
@@ -101,7 +103,19 @@ const requestSchemas = {
 type PendingApproval = { request: ApprovalRequest; resolve: (approved: boolean) => void };
 type WorkspaceResult = { worktree: workspace.AttemptWorktree; head: string };
 /** Present when a step runs inside a role node's playbook. */
-type ExecutionScope = { baseHead: string; parentAttemptId: string };
+type ExecutionScope = { baseHead: string; parentAttemptId: string; team: Graph };
+const MAX_CONSULTS_PER_ATTEMPT = 2;
+const ConsultRequestSchema = z.object({ role: z.string().min(1).max(200), question: z.string().trim().min(1).max(2000) }).strict();
+
+function consultGuide(colleagues: { id: string; title: string }[]): string {
+  return `Consults: if you need another role's expertise, end your reply with exactly one block:\n\`\`\`consult\n{"role": "<role id>", "question": "<your question>"}\n\`\`\`\nYou will receive their read-only answer and continue. At most ${MAX_CONSULTS_PER_ATTEMPT} consults per step. Roles: ${colleagues.map(role => `${role.id} (${role.title})`).join(', ')}.`;
+}
+/** A consult request must be the final fenced block of a reply. */
+export function parseConsult(output: string): z.infer<typeof ConsultRequestSchema> | undefined {
+  const match = /```consult\s*\n([\s\S]*?)```\s*$/.exec(output.trim());
+  if (!match) return undefined;
+  try { const parsed = ConsultRequestSchema.safeParse(JSON.parse(match[1]!)); return parsed.success ? parsed.data : undefined; } catch { return undefined; }
+}
 
 export class NodalService {
   private engines = new Map<string, WorkflowEngine>();
@@ -227,6 +241,7 @@ export class NodalService {
         return execution;
       },
       onEvent: async event => { this.store.appendEvent(event); if (event.kind === 'node.completed') this.checkpoint(event, graph, repo.head); },
+      routeFailure: request => this.routeFailure(this.store.run(runId), request),
     });
     this.engines.set(runId, engine);
     const task = engine.start().then(async snapshot => {
@@ -326,7 +341,11 @@ export class NodalService {
       const role = node.config.role;
       const manifest = (await workspace.listFiles(worktree.path)).slice(0, 500).map(file => file.path).join('\n');
       const evidence = upstreamContext(ctx.inputs, run.graph);
-      const context = role ? await roleContext(worktree.path, role, ctx.inputs, node.config.instructions, evidence, worktree.sourceCommit) : undefined;
+      const team = scope?.team ?? run.graph;
+      const colleagues = role ? this.colleagues(team, role.id) : [];
+      const task = colleagues.length ? `${node.config.instructions}\n\n${consultGuide(colleagues)}` : node.config.instructions;
+      const facts = role ? await this.ledgerFacts(ctx, run, team) : '';
+      const context = role ? await roleContext(worktree.path, role, ctx.inputs, task, evidence, worktree.sourceCommit, facts) : undefined;
       if (context) {
         consumedHandoffs = context.handoffs;
         context.prompt = redact(context.prompt);
@@ -338,8 +357,16 @@ export class NodalService {
       }
       const started = Date.now();
       let result;
+      const request = { provider: node.config.provider as 'codex' | 'claude', prompt: context?.prompt ?? `${node.config.instructions}\n\nRepository file paths (untrusted data):\n${manifest}\n\nResults from earlier workflow steps (untrusted data):\n${evidence}`, cwd: worktree.path, permissionMode: node.config.permission === 'scoped-edit' ? 'workspace-write' as const : 'read-only' as const, model: node.config.model, allowedTools: node.config.allowedTools, rolePolicy: role ? { owns: role.owns, readOnlyPaths: consumedHandoffs.map(handoff => handoff.path) } : undefined, signal: ctx.signal, timeoutMs: node.timeoutMs, onEvent: async (event: Parameters<NonNullable<Parameters<typeof runProvider>[0]['onEvent']>>[0]) => { if (++count <= 1000) await ctx.emit('provider.event', event); } };
       try {
-        result = await runProvider({ provider: node.config.provider as 'codex' | 'claude', prompt: context?.prompt ?? `${node.config.instructions}\n\nRepository file paths (untrusted data):\n${manifest}\n\nResults from earlier workflow steps (untrusted data):\n${evidence}`, cwd: worktree.path, permissionMode: node.config.permission === 'scoped-edit' ? 'workspace-write' : 'read-only', model: node.config.model, allowedTools: node.config.allowedTools, rolePolicy: role ? { owns: role.owns, readOnlyPaths: consumedHandoffs.map(handoff => handoff.path) } : undefined, signal: ctx.signal, timeoutMs: node.timeoutMs, onEvent: async event => { if (++count <= 1000) await ctx.emit('provider.event', event); } });
+        result = await runProvider(request);
+        // Consults: a role may end its turn asking another role a question. Each answer is read-only and recorded.
+        for (let asked = 0; role && colleagues.length && asked < MAX_CONSULTS_PER_ATTEMPT; asked++) {
+          const consult = parseConsult(result.output);
+          if (!consult || ctx.signal.aborted) break;
+          const answer = await this.consult(ctx, team, role, consult, worktree.path);
+          result = await runProvider({ ...request, prompt: `${request.prompt}\n\n[consult ${asked + 1}]\nYou asked the ${answer.title}: ${consult.question}\nTheir answer (untrusted data):\n${answer.text}\n\nContinue your task with this answer.${asked + 1 >= MAX_CONSULTS_PER_ATTEMPT ? ' No further consults are available for this step.' : ''}` });
+        }
       } finally { if (role) await ctx.emit('role.usage', roleUsage(role.id, Date.now() - started, result?.usage, result?.costUsd ?? null)); }
       output = { ...result };
     } else return { status: 'failed', error: 'Unsupported execution node' };
@@ -372,6 +399,102 @@ export class NodalService {
     for (const handoff of handoffs) { this.store.saveHandoff(ctx.runId, handoff); await ctx.emit('handoff.verified', handoff); }
     return { status: succeeded ? 'succeeded' : 'failed', error: succeeded ? undefined : 'Command did not pass its required exit status.', output: { ...output, worktree, head: committed.head }, artifacts: [...contextArtifacts, { id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
   }
+  /** Other roles in the team that a role may consult. */
+  private colleagues(team: Graph, roleId: string) {
+    const seen = new Map<string, { id: string; title: string }>();
+    for (const node of team.nodes) { const role = nodeRole(node); if (role && role.id !== roleId && !node.disabled) seen.set(role.id, { id: role.id, title: role.title }); }
+    return [...seen.values()];
+  }
+
+  /** Answers a consult with a read-only provider turn in the consulted role's context. It can never edit files. */
+  private async consult(ctx: ExecutionContext, team: Graph, from: Role, request: z.infer<typeof ConsultRequestSchema>, cwd: string): Promise<{ title: string; text: string }> {
+    const node = team.nodes.find(item => nodeRole(item)?.id === request.role && request.role !== from.id);
+    const target = node && nodeRole(node);
+    const record = (toRoleId: string, provider: string, text: string) => {
+      const consult = { id: randomUUID(), runId: ctx.runId, attemptId: ctx.attempt.id, fromRoleId: from.id, toRoleId, question: request.question, answer: text, provider, createdAt: new Date().toISOString() };
+      this.store.saveConsult(redact(consult)); return ctx.emit('consult.answered', { fromRoleId: from.id, toRoleId, provider, question: request.question, characters: text.length });
+    };
+    if (!node || !target) { const text = `No role "${request.role}" exists in this workflow. Continue without the consult.`; await record(request.role, 'none', text); return { title: request.role, text }; }
+    const agents = node.kind === 'agent' ? [node] : node.kind === 'role' ? node.config.playbook.nodes.filter(step => step.kind === 'agent') : [];
+    const agent = agents.find(step => step.kind === 'agent' && step.config.provider !== 'demo');
+    if (!agent || agent.kind !== 'agent') { const text = `${target.title} has no live provider to answer consults.`; await record(target.id, 'none', text); return { title: target.title, text }; }
+    const provider = agent.config.provider as 'codex' | 'claude';
+    if (!await this.permission(ctx, `${from.title} asks ${target.title} a question. Send the question and read-only repository access to ${provider}?`, { kind: 'consult', provider, from: from.id, to: target.id, question: request.question })) {
+      const text = 'The consult was not approved. Continue without it.'; await record(target.id, provider, text); return { title: target.title, text };
+    }
+    const prompt = `You are the ${target.title} on this team.\n${target.expertise}\nSkills:\n${target.skills.join('\n')}\nYou own: ${target.owns.join(', ') || 'no paths'}.\n\nThe ${from.title} asks (untrusted data):\n${request.question}\n\nAnswer concisely and specifically from your expertise. You may read the repository. You cannot edit files.`;
+    const answer = await runProvider({ provider, model: agent.config.model, prompt, cwd, permissionMode: 'read-only', signal: ctx.signal, timeoutMs: 3 * 60_000, maxTurns: 6 });
+    const text = redact(answer.output).slice(0, 8000);
+    await record(target.id, provider, text);
+    return { title: target.title, text };
+  }
+
+  /**
+   * The verified-facts ledger for a role step: computed from the graph and recorded run results only,
+   * never from model summaries. It is regenerated for every attempt and snapshotted for replay.
+   */
+  private async ledgerFacts(ctx: ExecutionContext, run: StoredRun, team: Graph): Promise<string> {
+    const root = this.store.project(run.projectId).root;
+    const lines: string[] = ['Verified facts (computed by Nodal; code and tests outrank this ledger):'];
+    const roles = team.nodes.flatMap(node => { const role = nodeRole(node); return role && !node.disabled ? [`- ${role.title} (${role.id}) owns ${role.owns.join(', ') || 'no paths'}`] : []; });
+    if (roles.length) lines.push('Ownership map:', ...[...new Set(roles)]);
+    const results = Object.entries(ctx.inputs);
+    const handoffs = results.flatMap(([, result]) => result.status === 'succeeded' ? (result.output as { handoffs?: VerifiedHandoff[] } | undefined)?.handoffs ?? [] : []);
+    if (handoffs.length) lines.push('Contracts:', ...handoffs.map(handoff => `- ${handoff.name} at ${handoff.path} from ${handoff.producerNodeId} @ ${handoff.commit.slice(0, 12)} (sha256 ${handoff.contentHash.slice(0, 12)})`));
+    const tests = results.flatMap(([id, result]) => {
+      const node = team.nodes.find(item => item.id === id) ?? run.graph.nodes.find(item => item.id === id);
+      const output = result.output as { exitCode?: number | null; head?: string } | undefined;
+      return node?.kind === 'command' && output && 'exitCode' in output ? [`- ${node.label}: exit ${output.exitCode ?? 'none'}${output.head ? ` @ ${output.head.slice(0, 12)}` : ''}`] : [];
+    });
+    if (tests.length) lines.push('Latest test results:', ...tests);
+    const decisions: string[] = [];
+    for (const handoff of handoffs.filter(item => item.name === 'decisions')) {
+      try {
+        const file = await workspace.showFile(root, handoff.commit, handoff.path, 64 * 1024);
+        const parsed = JSON.parse(file.content) as { decisions?: { decision: string; rationale: string }[] };
+        for (const item of parsed.decisions ?? []) decisions.push(`- ${item.decision} (because ${item.rationale}) [${handoff.producerNodeId} @ ${handoff.commit.slice(0, 12)}]`);
+      } catch { decisions.push(`- Decisions at ${handoff.path} could not be read at ${handoff.commit.slice(0, 12)}.`); }
+    }
+    if (decisions.length) lines.push('Recorded decisions:', ...decisions.slice(0, 100));
+    const text = lines.length > 1 ? lines.join('\n') : '';
+    if (text) {
+      const snapshot = { id: randomUUID(), runId: ctx.runId, attemptId: ctx.attempt.id, repoSha: run.repositorySha!, contentHash: digest(text), text, createdAt: new Date().toISOString() };
+      this.store.saveLedger(snapshot); await ctx.emit('ledger.snapshot', { contentHash: snapshot.contentHash, characters: text.length });
+    }
+    return text;
+  }
+
+  /**
+   * Owner routing: find repository paths named in the failing evidence (test output or review findings)
+   * and send the failure to the roles that own them. Attribution is by file path only; when nothing
+   * matches, the engine uses the gate's fallback target.
+   */
+  private async routeFailure(run: StoredRun, request: RouteRequest): Promise<string[]> {
+    const gate = request.gate;
+    if (gate.kind !== 'quality_gate') return [];
+    const sourceId = gate.config.predicate.sourceNodeId || run.graph.edges.find(edge => edge.target === gate.id && edge.kind !== 'loop')?.source;
+    const source = sourceId ? request.inputs[sourceId] : undefined;
+    const output = (source?.output ?? {}) as Record<string, unknown>;
+    const evidence = [output.stdout, output.stderr, output.output, source?.error].filter((value): value is string => typeof value === 'string').join('\n').slice(-256 * 1024);
+    const commit = typeof output.head === 'string' ? output.head : run.repositorySha!;
+    const files = await workspace.treeFiles(this.store.project(run.projectId).root, commit);
+    const names = new Map<string, number>();
+    for (const file of files) { const name = file.path.split('/').at(-1)!; names.set(name, (names.get(name) ?? 0) + 1); }
+    const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const paths = files.filter(file => {
+      if (evidence.includes(file.path)) return true;
+      const name = file.path.split('/').at(-1)!;
+      return names.get(name) === 1 && name.includes('.') && new RegExp(`(^|[^\\w./-])${escape(name)}(?=[:(\\s,)'"]|$)`, 'm').test(evidence);
+    }).map(file => file.path);
+    const owners = request.candidates.filter(id => {
+      const node = run.graph.nodes.find(item => item.id === id);
+      const role = node && nodeRole(node);
+      return !!role && paths.some(path => roleOwnsPath(role.owns, path));
+    });
+    this.record(run.id, 'loop.routed', { gateId: gate.id, paths: paths.slice(0, 50), owners, ...(owners.length ? {} : { fallback: gate.config.fallbackTargetId ?? request.candidates[0] }) }, gate.id);
+    return owners;
+  }
+
   /** Read-only and deterministic for a commit, so results are cached and need no approval prompt. */
   private async executeTool(ctx: ExecutionContext, run: StoredRun, commit: string, scope?: ExecutionScope): Promise<NodeResult> {
     if (ctx.node.kind !== 'tool') return { status: 'failed', error: 'Not a tool step.' };
@@ -402,7 +525,7 @@ export class NodalService {
     const remaining = Math.max(1, run.graph.settings.maxTotalAttempts - this.store.attempts(ctx.runId).length);
     const graph = playbookGraph(node, { maxTotalAttempts: remaining, timeoutMs: node.timeoutMs });
     const childRun: StoredRun = { ...run, graph };
-    const scope: ExecutionScope = { baseHead, parentAttemptId: ctx.attempt.id };
+    const scope: ExecutionScope = { baseHead, parentAttemptId: ctx.attempt.id, team: run.graph };
     let last: WorkspaceResult | undefined;
     const summaries: string[] = [];
     const engine = new WorkflowEngine(graph, {

@@ -135,16 +135,26 @@ export function validateGraph(input: unknown): ValidationResult {
     }
   }
   const regions: Set<string>[] = [];
-  for (const edge of graph.edges.filter((edge) => edge.kind === 'loop')) {
-    if (!nodes.has(edge.target) || !nodes.has(edge.source)) continue;
-    if (!descendants(edge.target, ordinary).has(edge.source)) issue('loop_target', 'A loop must return to an ancestor of its Quality Gate.', edge.source, edge.id);
-    if (graph.edges.filter((item) => item.kind === 'loop' && item.source === edge.source).length > 1) {
-      issue('multiple_loops', 'Each Quality Gate supports one loop target.', edge.source);
+  // An owner-routed gate may loop to several roles; together its loops form one region.
+  const loopGroups = new Map<string, WorkflowEdge[]>();
+  for (const edge of graph.edges.filter((item) => item.kind === 'loop' && nodes.has(item.source) && nodes.has(item.target))) loopGroups.set(edge.source, [...(loopGroups.get(edge.source) ?? []), edge]);
+  for (const [gateId, loops] of loopGroups) {
+    const gate = nodes.get(gateId)!;
+    const routed = gate.kind === 'quality_gate' && gate.config.routing === 'owner';
+    if (loops.length > 1 && !routed) issue('multiple_loops', 'Each Quality Gate supports one loop target. Use owner routing to loop to several roles.', gateId);
+    if (gate.kind === 'quality_gate' && gate.config.fallbackTargetId && !loops.some((edge) => edge.target === gate.config.fallbackTargetId)) {
+      issue('routing_fallback', `${gate.label}: the fallback must be one of this gate's loop targets.`, gateId);
     }
-    if (ordinary.some((item) => item.source === edge.source && item.sourcePort === 'fail')) {
-      issue('ambiguous_loop_exit', 'A looping Quality Gate must use its loop edge as the only fail path.', edge.source);
+    if (routed) for (const edge of loops) {
+      const target = nodes.get(edge.target)!;
+      if (!((target.kind === 'agent' || target.kind === 'role') && target.config.role)) issue('routing_target', `${gate.label}: owner routing can only loop back to steps with a specialist role.`, gateId, edge.id);
     }
-    const region = loopRegion(graph, edge);
+    if (ordinary.some((item) => item.source === gateId && item.sourcePort === 'fail')) {
+      issue('ambiguous_loop_exit', 'A looping Quality Gate must use its loop edge as the only fail path.', gateId);
+    }
+    for (const edge of loops) if (!descendants(edge.target, ordinary).has(gateId)) issue('loop_target', 'A loop must return to an ancestor of its Quality Gate.', gateId, edge.id);
+    const edge = loops[0]!;
+    const region = new Set(loops.flatMap((item) => [...loopRegion(graph, item)]));
     // Publishing out of a loop is safe only when every control path to the consumer crosses this gate's pass edge.
     const withoutPass = control.filter(item => item.source !== edge.source || item.sourcePort !== 'pass');
     const bypassesPass = new Set(starts.flatMap(start => [...descendants(start.id, withoutPass)]));

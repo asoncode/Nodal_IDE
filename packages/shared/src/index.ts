@@ -69,6 +69,10 @@ const QualityGateConfigSchema = z.object({
   predicate: PredicateSchema.default({ sourceNodeId: '', field: 'exitCode', operator: 'eq', value: 0 }),
   maxIterations: z.number().int().min(1).max(20).default(4),
   inconclusive: z.enum(['fail', 'approval']).default('fail'),
+  /** "owner": a failure re-runs only the roles that own the paths named in the failing evidence. */
+  routing: z.enum(['single', 'owner']).optional(),
+  /** Loop target used when owner routing cannot attribute a failure. */
+  fallbackTargetId: z.string().optional(),
 }).strict();
 
 const ToolScopes = z.array(RoleScopeSchema).max(50).default([]);

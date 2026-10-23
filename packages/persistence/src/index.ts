@@ -20,6 +20,8 @@ export function redact<T>(value: T): T {
 const json = (value: unknown) => JSON.stringify(redact(value));
 const now = () => new Date().toISOString();
 export interface Project { id: string; name: string; root: string; createdAt: string; branch?: string; isGitRepository?: boolean }
+export interface Consult { id: string; runId: string; attemptId: string; fromRoleId: string; toRoleId: string; question: string; answer: string; provider: string; createdAt: string }
+export interface LedgerSnapshot { id: string; runId: string; attemptId: string; repoSha: string; contentHash: string; text: string; createdAt: string }
 export type StoredRun = Partial<WorkflowRun> & { id: string; projectId: string; graph: Graph; status: string; createdAt: string; repositorySha?: string; parentRunId?: string };
 
 export class Store {
@@ -59,6 +61,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS tool_cache(key TEXT PRIMARY KEY, tool TEXT NOT NULL, repo_sha TEXT NOT NULL, json TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS repo_index(blob TEXT PRIMARY KEY, json TEXT NOT NULL, created_at TEXT NOT NULL);
       INSERT OR IGNORE INTO migrations VALUES(3,datetime('now'));
+      CREATE TABLE IF NOT EXISTS consults(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), attempt_id TEXT NOT NULL, from_role_id TEXT NOT NULL, to_role_id TEXT NOT NULL, json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ledger_snapshots(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), attempt_id TEXT NOT NULL, repo_sha TEXT NOT NULL, json TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS consults_run ON consults(run_id);
+      INSERT OR IGNORE INTO migrations VALUES(4,datetime('now'));
     `));
   }
   transaction<T>(action: () => T): T {
@@ -115,6 +121,10 @@ export class Store {
   /** Content-addressed file index: a Git blob SHA identifies exact file contents. */
   fileIndex<T>(blob: string): T | undefined { return this.one<T>('SELECT json FROM repo_index WHERE blob=?', blob); }
   saveFileIndex(blob: string, index: unknown): void { this.db.prepare('INSERT OR REPLACE INTO repo_index VALUES(?,?,?)').run(blob, json(index), now()); }
+  saveConsult(consult: Consult): void { this.db.prepare('INSERT INTO consults VALUES(?,?,?,?,?,?)').run(consult.id, consult.runId, consult.attemptId, consult.fromRoleId, consult.toRoleId, json(consult)); }
+  consults(runId: string): Consult[] { this.run(runId); return this.many('SELECT json FROM consults WHERE run_id=? ORDER BY rowid', runId); }
+  saveLedger(snapshot: LedgerSnapshot): void { this.db.prepare('INSERT INTO ledger_snapshots VALUES(?,?,?,?,?)').run(snapshot.id, snapshot.runId, snapshot.attemptId, snapshot.repoSha, json(snapshot)); }
+  ledgers(runId: string): LedgerSnapshot[] { this.run(runId); return this.many('SELECT json FROM ledger_snapshots WHERE run_id=? ORDER BY rowid', runId); }
   saveHandoff(runId: string, handoff: VerifiedHandoff): void { this.db.prepare('INSERT INTO handoffs VALUES(?,?,?,?) ON CONFLICT(run_id,attempt_id,name) DO UPDATE SET json=excluded.json').run(runId, handoff.attemptId, handoff.name, json(handoff)); }
   handoffs(runId: string): VerifiedHandoff[] { this.run(runId); return this.many('SELECT json FROM handoffs WHERE run_id=? ORDER BY rowid', runId); }
   saveGraph(projectId: string, graph: Graph): Graph {

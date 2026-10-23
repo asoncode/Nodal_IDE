@@ -65,10 +65,10 @@ export function RoleLibrary({ projectId, role, onApply }: { projectId: string; r
 }
 
 export function RoleRunDetails({ events }: { events: { eventId: string; kind: string; payload: unknown }[] }) {
-  const recorded = events.filter(event => /^(role\.(context|usage|policy_violation)|handoff\.verified)$/.test(event.kind));
+  const recorded = events.filter(event => /^(role\.(context|usage|policy_violation)|handoff\.verified|consult\.answered|ledger\.snapshot|loop\.routed|tool\.result)$/.test(event.kind));
   if (!recorded.length) return null;
   return <section className="role-run-details" aria-label="Recorded role context"><div className="inspector-group">Recorded role context and usage</div>{recorded.map(event => {
     const payload = event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {};
-    return <details key={event.eventId}><summary>{event.kind === 'role.context' ? 'Context supplied' : event.kind === 'role.usage' ? 'Attempt usage' : event.kind === 'handoff.verified' ? 'Verified handoff' : 'Ownership policy violation'}</summary>{event.kind === 'role.usage' && <p className="field-help">Input tokens: {typeof payload.inputTokens === 'number' ? payload.inputTokens : 'unavailable'} · Output tokens: {typeof payload.outputTokens === 'number' ? payload.outputTokens : 'unavailable'} · Cost: {typeof payload.costUsd === 'number' ? `$${payload.costUsd}` : 'unavailable'}</p>}<pre>{JSON.stringify(event.payload, null, 2)}</pre></details>;
+    return <details key={event.eventId}><summary>{event.kind === 'role.context' ? 'Context supplied' : event.kind === 'role.usage' ? 'Attempt usage' : event.kind === 'handoff.verified' ? 'Verified handoff' : event.kind === 'consult.answered' ? 'Consult answered' : event.kind === 'ledger.snapshot' ? 'Verified-facts ledger' : event.kind === 'loop.routed' ? 'Failure routed to owners' : event.kind === 'tool.result' ? 'Tool result' : 'Ownership policy violation'}</summary>{event.kind === 'role.usage' && <p className="field-help">Input tokens: {typeof payload.inputTokens === 'number' ? payload.inputTokens : 'unavailable'} · Output tokens: {typeof payload.outputTokens === 'number' ? payload.outputTokens : 'unavailable'} · Cost: {typeof payload.costUsd === 'number' ? `$${payload.costUsd}` : 'unavailable'}</p>}<pre>{JSON.stringify(event.payload, null, 2)}</pre></details>;
   })}</section>;
 }
