@@ -1,9 +1,9 @@
 .terminal-panel { flex: 1; min-height: 0; min-width: 0; overflow: hidden; flex-direction: column; background: var(--bg-side); }
 .terminal-toolbar { display: flex; height: 30px; flex-shrink: 0; border-bottom: 1px solid var(--border); padding: 0 8px 0 12px; gap: 8px; }
 .terminal-tabs { display: flex; min-width: 0; overflow-x: auto; flex: 1; }
-.terminal-tabs > button { gap: 6px; padding: 0 10px; min-width: 0; border-bottom: 1px solid transparent; color: var(--fg-muted); font-size: 12px; }
+.terminal-tabs > button { gap: 6px; padding: 0 10px; margin: 3px 0; min-width: 0; border-radius: 6px; color: var(--fg-muted); font-size: 12px; }
 .terminal-tabs > button:hover { background: var(--bg-hover); }
-.terminal-tabs > button[aria-selected=true] { color: var(--fg-strong); border-bottom-color: var(--accent); }
+.terminal-tabs > button[aria-selected=true] { color: var(--fg-strong); background: var(--bg-active); }
 .terminal-tabs > button > span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-tabs small { color: var(--fg-dim); font-size: 10px; }
 .terminal-tabs small.running { color: var(--running); }

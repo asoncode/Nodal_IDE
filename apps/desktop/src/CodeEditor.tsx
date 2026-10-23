@@ -84,13 +84,13 @@ const CodeEditor = forwardRef<CodeEditorHandle, Props>(function CodeEditor({ pro
       <label><input type="checkbox" checked={settings.minimap} onChange={event => update({ minimap: event.target.checked })}/>Minimap</label>
       <button onClick={() => setPreferences(false)}>Done</button>
     </div>}
-    <Editor path={uri(buffer.path)} language={language(buffer.path)} value={buffer.content} theme="vs-dark" onChange={(value: string | undefined) => { if (!syncing.current) onChange(value ?? ''); }}
+    <Editor path={uri(buffer.path)} language={language(buffer.path)} value={buffer.content} theme="nodal" onChange={(value: string | undefined) => { if (!syncing.current) onChange(value ?? ''); }}
       onMount={(editor: editor.IStandaloneCodeEditor) => {
         instance.current = editor; cursorListener.current?.dispose();
         cursorListener.current = editor.onDidChangeCursorPosition(event => current.current.onCursor(event.position.lineNumber, event.position.column));
         reconcile(); if (visible) editor.focus(); navigate();
       }} onValidate={(markers: editor.IMarker[]) => onProblems(buffer.path, markers.map(marker => ({ message: marker.message, severity: marker.severity, startLineNumber: marker.startLineNumber, startColumn: marker.startColumn })))}
-      options={{ editContext: false, readOnly, fontSize: settings.fontSize, lineHeight: Math.round(settings.fontSize * 1.6), tabSize: settings.tabSize, insertSpaces: true, wordWrap: settings.wordWrap ? 'on' : 'off', fontFamily: "'SF Mono', Menlo, Consolas, monospace", minimap: { enabled: settings.minimap }, padding: { top: 8 }, scrollBeyondLastLine: false, automaticLayout: true, renderLineHighlight: 'line' }}/>
+      options={{ editContext: false, readOnly, fontSize: settings.fontSize, lineHeight: Math.round(settings.fontSize * 1.6), tabSize: settings.tabSize, insertSpaces: true, wordWrap: settings.wordWrap ? 'on' : 'off', fontFamily: "'Fragment Mono', 'SF Mono', Menlo, Consolas, monospace", minimap: { enabled: settings.minimap }, padding: { top: 8 }, scrollBeyondLastLine: false, automaticLayout: true, renderLineHighlight: 'line' }}/>
   </>;
 });
 export default CodeEditor;

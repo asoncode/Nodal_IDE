@@ -8,9 +8,18 @@ import TsWorker from 'monaco-editor/language/typescript/ts.worker.js?worker';
 import HtmlWorker from 'monaco-editor/language/html/html.worker.js?worker';
 import CssWorker from 'monaco-editor/language/css/css.worker.js?worker';
 import App from './App.js';
+import { installNodalSyntax } from './syntax.js';
+import '@fontsource/instrument-sans/latin-400.css';
+import '@fontsource/instrument-sans/latin-500.css';
+import '@fontsource/instrument-sans/latin-600.css';
+import '@fontsource/martian-mono/latin-500.css';
+import '@fontsource/fragment-mono/latin-400.css';
 import '@xyflow/react/dist/style.css';
 import './styles.css';
 
 self.MonacoEnvironment = { getWorker: (_moduleId, label) => label === 'json' ? new JsonWorker() : ['typescript', 'javascript'].includes(label) ? new TsWorker() : ['html', 'handlebars', 'razor'].includes(label) ? new HtmlWorker() : ['css', 'scss', 'less'].includes(label) ? new CssWorker() : new EditorWorker() };
 loader.config({ monaco });
+installNodalSyntax(monaco);
+// Monaco measures glyphs once; re-measure after the bundled code font loads.
+void document.fonts.ready.then(() => monaco.editor.remeasureFonts());
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);

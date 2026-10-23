@@ -6,7 +6,7 @@
 .search-notice { color: var(--warn); font-size: 11px; line-height: 1.5; }
 .search-error { color: var(--err); overflow-wrap: anywhere; }
 .search-results { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.search-result { display: flex; flex-direction: column; align-items: stretch; gap: 3px; padding: 6px; text-align: left; border-radius: 2px; white-space: normal; }
+.search-result { display: flex; flex-direction: column; align-items: stretch; gap: 3px; padding: 6px 8px; text-align: left; border-radius: 6px; white-space: normal; }
 .search-result:hover { background: var(--bg-hover); }
 .search-location { color: var(--fg-strong); font-size: 11px; overflow-wrap: anywhere; }
 .search-preview { color: var(--fg-muted); font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1,5 +1,6 @@
 .explorer-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .file-tree, .explorer-trash { flex: 1; min-height: 0; overflow: auto; }
+.file-tree { padding: 0 6px; }
 .explorer-panel .view-title { padding-right: 6px; }
 .explorer-panel .explorer-actions { gap: 1px; }
 .explorer-panel .explorer-actions .icon-button { width: 23px; min-width: 23px; }
@@ -7,17 +8,17 @@
 .explorer-root strong { overflow: hidden; text-overflow: ellipsis; }
 .explorer-filter { display: flex; gap: 4px; padding: 4px 10px 7px; }
 .explorer-filter input { width: 100%; min-width: 0; height: 25px; }
-.explorer-row { display: flex; position: relative; min-width: 0; height: 24px; }
+.explorer-row { display: flex; position: relative; min-width: 0; height: 24px; border-radius: 6px; }
 .explorer-row:hover, .explorer-row:focus-within { background: var(--bg-hover); }
 .explorer-row.selected { background: var(--bg-active); }
 .explorer-entry { flex: 1; min-width: 0; gap: 5px; text-align: left; font-size: 13px; }
 .explorer-entry > span:not(.dirty-dot) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .explorer-entry svg { flex-shrink: 0; color: var(--fg-muted); }
-.explorer-entry > svg:only-of-type { color: #519aba; margin-left: 14px; }
+.explorer-entry > svg:only-of-type { color: var(--fg-dim); margin-left: 14px; }
 .explorer-more { opacity: 0; flex-shrink: 0; }
 .explorer-row:hover .explorer-more, .explorer-row:focus-within .explorer-more, .explorer-more[aria-expanded=true] { opacity: 1; }
-.explorer-menu { position: absolute; z-index: 20; top: 23px; right: 5px; min-width: 170px; padding: 4px; border: 1px solid var(--border-strong); background: var(--bg-elevated); box-shadow: 0 4px 12px #0006; }
-.explorer-menu button { width: 100%; min-height: 27px; padding: 3px 8px; gap: 7px; text-align: left; }
+.explorer-menu { position: absolute; z-index: 20; top: 23px; right: 5px; min-width: 170px; padding: 4px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--bg-elevated); box-shadow: 0 8px 24px #0008; }
+.explorer-menu button { width: 100%; min-height: 27px; padding: 3px 8px; gap: 7px; border-radius: 5px; text-align: left; }
 .explorer-menu button:hover { background: var(--bg-active); }
 .explorer-hint, .explorer-error { margin: 8px 12px; font-size: 12px; line-height: 1.5; }
 .explorer-hint { color: var(--fg-muted); }
@@ -25,10 +26,10 @@
 .explorer-panel .new-file-input { gap: 3px; }
 .explorer-panel .new-file-input input { min-width: 0; }
 .explorer-panel .new-file-input > button { padding: 3px 5px; }
-.explorer-confirm { margin: 6px 10px; padding: 8px; border: 1px solid var(--border-strong); background: var(--bg-elevated); }
+.explorer-confirm { margin: 6px 10px; padding: 9px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-elevated); }
 .explorer-confirm p { margin: 0 0 8px; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
-.explorer-confirm button { display: inline-flex; padding: 4px 8px; margin-right: 5px; border: 1px solid var(--border-strong); }
-.explorer-confirm button:first-of-type { background: var(--accent); color: white; }
+.explorer-confirm button { display: inline-flex; padding: 4px 9px; margin-right: 5px; border: 1px solid var(--border-strong); border-radius: 6px; }
+.explorer-confirm button:first-of-type { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .explorer-trash-heading, .explorer-trash-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 12px; gap: 5px; }
 .explorer-trash-heading { border-bottom: 1px solid var(--border); font-size: 12px; }
 .explorer-trash-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

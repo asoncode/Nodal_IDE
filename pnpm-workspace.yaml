@@ -4,3 +4,5 @@ packages:
 allowBuilds:
   esbuild: true
   node-pty: true
+# Keep dependencies in the global pnpm store so node_modules stays out of Dropbox sync.
+enableGlobalVirtualStore: true

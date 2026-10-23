@@ -3,9 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../../persistence/src/index.js';
-import { NodalService } from '../src/service.js';
+import { NodalService, PLANNING_RULES } from '../src/service.js';
 import { startServer } from '../src/server.js';
-import { createCommandGraph } from '../../core/src/templates.js';
+import { createCommandGraph, featureBuilder } from '../../core/src/templates.js';
+import { validateGraph } from '../../core/src/validation.js';
+import { createNode } from '../../shared/src/index.js';
 import type { GenerationSnapshot } from '../../shared/src/generation.js';
 const { runProvider, checkAvailability } = vi.hoisted(() => ({ runProvider: vi.fn(), checkAvailability: vi.fn() }));
 vi.mock('../../providers/src/index.js', () => ({ runProvider, checkAvailability }));
@@ -20,6 +22,39 @@ describe('untrusted graph planning boundary', () => {
     expect(runProvider.mock.calls[0][0]).toMatchObject({ noTools: true, maxTurns: 6, permissionMode: 'read-only', outputSchema: { $schema: 'http://json-schema.org/draft-07/schema#' } });
     expect(runProvider.mock.calls[1][0].prompt).toContain('Correct this invalid graph');
     expect(store.graphs(projectId)).toEqual([]); expect(store.runs(projectId)).toEqual([]);
+  });
+  it('gives the planner the engine wiring rules with an example that itself validates', async () => {
+    runProvider.mockResolvedValueOnce({ output: JSON.stringify(createCommandGraph()) });
+    await service.dispatch('generateGraph', { projectId, graph: createCommandGraph(), prompt: 'Add a test loop', provider: 'claude' });
+    const prompt = runProvider.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('Every edge leaving a "quality_gate" uses "pass", "fail", or "inconclusive"');
+    expect(prompt).toContain('{"kind":"loop","sourcePort":"fail"}');
+    expect(prompt).toContain('Do not create separate fix nodes entered only by a loop edge');
+    expect(prompt).toContain(JSON.stringify(featureBuilder));
+    expect(validateGraph(featureBuilder).valid).toBe(true);
+  });
+  it('describes a parallel, merged, review-gated shape that the validator accepts', () => {
+    const n = (kind: Parameters<typeof createNode>[0], id: string, config: object = {}) => { const base = createNode(kind, id, { x: 0, y: 0 }); return { ...base, label: id, config: { ...base.config, ...config } }; };
+    const e = (source: string, target: string, sourcePort?: string, kind: 'control' | 'loop' = 'control') => ({ id: `${source}-${target}`, source, target, kind, ...(sourcePort ? { sourcePort } : {}) });
+    const gate = (source: string, field = 'exitCode', operator = 'eq', value: unknown = 0) => ({ predicate: { sourceNodeId: source, field, operator, value }, maxIterations: 3 });
+    const graph = { schemaVersion: 1, id: 'g', name: 'shape', revision: 1, settings: { maxConcurrency: 3, maxTotalAttempts: 60, timeoutMs: 3_600_000 }, nodes: [
+      n('start', 'start'), n('agent', 'plan'), n('parallel', 'split'),
+      n('agent', 'backend', { permission: 'scoped-edit' }), n('command', 'backendTests'), n('quality_gate', 'backendGate', gate('backendTests')),
+      n('agent', 'frontend', { permission: 'scoped-edit' }), n('command', 'frontendTests'), n('quality_gate', 'frontendGate', gate('frontendTests')),
+      n('join', 'join'), n('merge', 'merge', { sourceNodeIds: ['backend', 'frontend'] }),
+      n('agent', 'integrate', { permission: 'scoped-edit' }), n('command', 'allTests'), n('quality_gate', 'testGate', gate('allTests')),
+      n('agent', 'address', { permission: 'scoped-edit' }), n('agent', 'review', { provider: 'claude' }), n('quality_gate', 'reviewGate', gate('review', 'output', 'contains', 'VERDICT: PASS')),
+      n('approval', 'approval'), n('end', 'end'),
+    ], edges: [
+      e('start', 'plan'), e('plan', 'split'), e('split', 'backend'), e('split', 'frontend'),
+      e('backend', 'backendTests'), e('backendTests', 'backendGate'), e('backendGate', 'backend', 'fail', 'loop'), e('backendGate', 'join', 'pass'),
+      e('frontend', 'frontendTests'), e('frontendTests', 'frontendGate'), e('frontendGate', 'frontend', 'fail', 'loop'), e('frontendGate', 'join', 'pass'),
+      e('join', 'merge'), e('merge', 'integrate'), e('integrate', 'allTests'), e('allTests', 'testGate'), e('testGate', 'integrate', 'fail', 'loop'),
+      e('testGate', 'address', 'pass'), e('address', 'review'), e('review', 'reviewGate'), e('reviewGate', 'address', 'fail', 'loop'), e('reviewGate', 'approval', 'pass'), e('approval', 'end'),
+    ] };
+    const check = validateGraph(graph);
+    expect(check.errors).toEqual([]);
+    for (const rule of ['"parallel"', '"merge"', 'VERDICT: PASS', '"field": "output", "operator": "contains"']) expect(PLANNING_RULES).toContain(rule);
   });
   it('stops after two invalid responses and preserves the existing saved draft', async () => {
     const saved = store.saveGraph(projectId, createCommandGraph()); runProvider.mockResolvedValue({ output: 'not JSON' });

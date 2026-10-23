@@ -15,7 +15,7 @@ vi.mock('@monaco-editor/react', () => ({
 }));
 vi.mock('@xyflow/react', () => ({
   ReactFlow: ({ nodes, onNodeClick, children }: { nodes: { id: string; data: { node: { label: string } } }[]; onNodeClick: (event: unknown, node: { id: string }) => void; children: React.ReactNode }) => <div aria-label="Workflow graph">{nodes.map(node => <button key={node.id} onClick={() => onNodeClick({}, node)}>{node.data.node.label}</button>)}{children}</div>,
-  Background: () => null, BackgroundVariant: { Dots: 'dots' }, Controls: () => null, MiniMap: () => null, Handle: () => null,
+  Background: () => null, BackgroundVariant: { Dots: 'dots', Cross: 'cross' }, Controls: () => null, MiniMap: () => null, Handle: () => null,
   Position: { Left: 'left', Right: 'right' }, applyNodeChanges: vi.fn(), applyEdgeChanges: vi.fn(),
 }));
 
@@ -65,6 +65,8 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); vi.restoreAllMocks(); });
 async function ready() {
   render(<App/>);
   await screen.findByRole('button', { name: 'Check Node' });
+  // Startup work finishes a tick after the graph renders; actions are disabled until then.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false));
 }
 
 describe('workspace flows', () => {

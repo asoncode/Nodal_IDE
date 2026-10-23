@@ -165,6 +165,9 @@ export function claudeOptions(input: AgentRunInput, controller: AbortController)
   const supported = writable ? ['Read', 'Edit', 'Write', ...(commands ? ['Bash'] : [])] : ['Read'];
   if (input.allowedTools?.some(tool => !supported.includes(tool))) throw new Error('Claude supports only Read, plus Edit/Write with scoped-edit permission.');
   const tools = input.noTools ? [] : input.allowedTools?.length ? [...input.allowedTools] : supported;
+  // With outputFormat, the SDK returns the schema result through its own StructuredOutput tool.
+  // It only carries the answer (no files, commands, or network), so it stays callable even in tool-free planning.
+  const permitted = input.outputSchema ? [...tools, 'StructuredOutput'] : tools;
   return {
     cwd: input.cwd, model: input.model || undefined, resume: input.resumeId,
     abortController: controller, permissionMode: 'default', settingSources: [],
@@ -172,10 +175,11 @@ export function claudeOptions(input: AgentRunInput, controller: AbortController)
     mcpServers: {}, strictMcpConfig: true, plugins: [],
     maxTurns: input.maxTurns ?? 12, maxBudgetUsd: input.maxBudgetUsd,
     outputFormat: input.outputSchema ? { type: 'json_schema', schema: input.outputSchema } : undefined,
-    canUseTool: async (name, toolInput) => tools.includes(name)
+    canUseTool: async (name, toolInput) => permitted.includes(name)
       ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: 'This tool is not authorized by the node policy.' },
     hooks: { PreToolUse: [{ hooks: [async (event) => {
       if (event.hook_event_name !== 'PreToolUse') return {};
+      if (input.outputSchema && event.tool_name === 'StructuredOutput') return {};
       try {
         if (!tools.includes(event.tool_name)) throw new Error('Tool not authorized.');
         const args = event.tool_input as Record<string, unknown>;

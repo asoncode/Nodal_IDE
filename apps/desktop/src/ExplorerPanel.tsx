@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, ChevronsDownUp, Copy, FileCode2, FilePlus2, Folder, FolderOpen, FolderPlus, MoreHorizontal, RefreshCw, Trash2, Undo2, X } from 'lucide-react';
 import { api } from './api.js';
 import type { FileBuffer, Project } from './model.js';
@@ -49,6 +49,9 @@ export default function ExplorerPanel(props: ExplorerPanelProps) {
     } catch (cause) { if (scope.mounted && lifetime.current === scope && scan.current === request) setError(message(cause)); }
     finally { if (scan.current === request) { scan.current = undefined; if (scope.mounted && lifetime.current === scope) setRefreshing(false); } }
   }, []);
+  // Passive-effect cleanup can run after the next folder is already on screen; end this
+  // panel's lifetime synchronously so late file-operation results are always discarded.
+  useLayoutEffect(() => { const scope = lifetime.current; scope.mounted = true; return () => { scope.mounted = false; }; }, [project?.id]);
   useEffect(() => {
     const scope = lifetime.current; scope.mounted = true;
     mutation.current = undefined; scan.current = undefined;

@@ -114,6 +114,17 @@ describe('provider policy and event adapters (SDK mocks, no network)', () => {
     await expect(runProvider({ provider: 'codex', cwd: tmpdir(), prompt: 'plan', noTools: true })).rejects.toThrow('Select Claude');
     expect(startThread).not.toHaveBeenCalled();
   });
+  it('lets tool-free planning return its schema result through the SDK StructuredOutput tool', async () => {
+    const schema = { type: 'object', properties: { name: { type: 'string' } } };
+    const planner = claudeOptions({ provider: 'claude', cwd: tmpdir(), prompt: 'plan', noTools: true, outputSchema: schema }, new AbortController());
+    const hook = planner.hooks!.PreToolUse![0].hooks[0] as any;
+    const call = (tool_name: string) => ({ hook_event_name: 'PreToolUse', tool_name, tool_input: { name: 'Plan' } });
+    expect(await hook(call('StructuredOutput'))).toEqual({});
+    expect(await planner.canUseTool!('StructuredOutput', { name: 'Plan' }, {} as any)).toMatchObject({ behavior: 'allow' });
+    expect(await hook(call('Read'))).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    const withoutSchema = claudeOptions({ provider: 'claude', cwd: tmpdir(), prompt: 'plan', noTools: true }, new AbortController());
+    expect(await (withoutSchema.hooks!.PreToolUse![0].hooks[0] as any)(call('StructuredOutput'))).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+  });
   it('rejects out-of-scope and linked file tool arguments, permits new scoped files', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'nodal-provider-test-'));
     try {

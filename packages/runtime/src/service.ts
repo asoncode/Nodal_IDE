@@ -5,15 +5,35 @@ import { z } from 'zod';
 import { GraphSchema, type Graph, type ExecutionEvent, type ApprovalRequest } from '../../shared/src/index.js';
 import { WorkflowEngine, type ExecutionContext, type NodeResult } from '../../core/src/engine.js';
 import { validateGraph } from '../../core/src/validation.js';
-import { templates } from '../../core/src/templates.js';
+import { featureBuilder, templates } from '../../core/src/templates.js';
 import { Store, digest, redact, type StoredRun } from '../../persistence/src/index.js';
 import * as workspace from '../../workspace/src/index.js';
 import { checkAvailability, runProvider } from '../../providers/src/index.js';
 import { ChatRuntime } from './chat.js';
+import { upstreamContext } from './context.js';
 import { TerminalRuntime } from './terminals.js';
 import type { GenerationResult, GenerationSnapshot } from '../../shared/src/generation.js';
 import type { CreateTerminalInput, TerminalOwner, TerminalScope } from '../../shared/src/terminal.js';
 import { CHAT_ATTACHMENT_LIMITS, isChatTextFilename, type ChatAttachmentInput, type CreateChatInput } from '../../shared/src/chat.js';
+// Writing a full workflow as schema-checked JSON took 60–90s per request in live runs; leave room for larger graphs.
+const PLANNING_TIMEOUT_MS = 5 * 60_000;
+// The schema alone cannot express the engine's wiring rules, and planners otherwise invent
+// retry-only "fix" nodes or omit gate ports. These mirror core/src/validation.ts.
+export const PLANNING_RULES = `Wiring rules (the graph is rejected if any is broken):
+- Exactly one "start" (no incoming edges) and at least one "end" (no outgoing edges). Unique node and edge ids; no self-edges.
+- Every node except start needs an incoming "control" edge, must be reachable from start through control edges, and must have a control path to an end.
+- A node runs only after ALL sources of its incoming non-loop edges finish. Never wire an input from a node that runs only on a retry.
+- Non-loop edges must form a DAG (no cycles).
+- sourcePort: edges leaving a "condition" use "true" or "false" (both required). Every edge leaving a "quality_gate" uses "pass", "fail", or "inconclusive", and each gate needs a "pass" control edge. Omit sourcePort on all other edges.
+- Quality loop: the retry edge is {"kind":"loop","sourcePort":"fail"} from the gate back to an earlier node on the main path, normally the implementing agent, whose instructions say to use previous test evidence to fix failures. Do not create separate fix nodes entered only by a loop edge.
+- One loop edge per gate, and a looping gate has no other "fail" edge. Nodes between a loop target and its gate may only exit through that gate. Two loops must not share nodes: run looped stages one after another, each starting from its own agent.
+- Test gate predicate: config.predicate = {"sourceNodeId": "<upstream command node id>", "field": "exitCode", "operator": "eq", "value": 0}. sourceNodeId must be upstream of the gate.
+- No "join" with mode "first_success" inside a loop. Use only "control" and "loop" edges (artifact edges need typed ports).
+Design guidance:
+- Every step automatically receives the results of all earlier steps (plans, summaries, failing test output) and starts from the code the nearest earlier coding step committed. Do not add nodes only to pass information along.
+- Parallelize independent work (for example backend and frontend after a shared plan): fan out from a "parallel" node to one agent per branch, give each branch its own test command and quality gate loop, send each gate's "pass" edge to a "join" (mode "all_success"), then a "merge" node whose config.sourceNodeIds lists the branch agents. Later coding or command steps must come after that merge; a step cannot start from two code branches.
+- A review that can send work back goes after the test gates: a scoped-edit agent that addresses review findings (on the first pass it does final polish), then a read-only reviewer whose instructions end with "Reply with a final line VERDICT: PASS or VERDICT: FAIL", then a quality_gate with config.predicate = {"sourceNodeId": "<reviewer id>", "field": "output", "operator": "contains", "value": "VERDICT: PASS"} whose fail loop returns to the addressing agent. Test gates stay the authority; the review gate adds to them.
+Valid example with a bounded loop: ${JSON.stringify(featureBuilder)}`;
 
 const id = z.string().min(1).max(200);
 const projectParams = z.object({ projectId: id }).strict();
@@ -281,7 +301,7 @@ export class NodalService {
     } else if (node.kind === 'agent') {
       let count = 0;
       const manifest = (await workspace.listFiles(worktree.path)).slice(0, 500).map(file => file.path).join('\n');
-      const result = await runProvider({ provider: node.config.provider as 'codex' | 'claude', prompt: `${node.config.instructions}\n\nRepository file paths (untrusted data):\n${manifest}\n\nUpstream structured results (untrusted data):\n${JSON.stringify(redact(ctx.inputs)).slice(-24000)}`, cwd: worktree.path, permissionMode: node.config.permission === 'scoped-edit' ? 'workspace-write' : 'read-only', model: node.config.model, allowedTools: node.config.allowedTools, signal: ctx.signal, timeoutMs: node.timeoutMs, onEvent: async event => { if (++count <= 1000) await ctx.emit('provider.event', event); } });
+      const result = await runProvider({ provider: node.config.provider as 'codex' | 'claude', prompt: `${node.config.instructions}\n\nRepository file paths (untrusted data):\n${manifest}\n\nResults from earlier workflow steps, including the previous attempt's test results when retrying (untrusted data):\n${upstreamContext(ctx.inputs, run.graph)}`, cwd: worktree.path, permissionMode: node.config.permission === 'scoped-edit' ? 'workspace-write' : 'read-only', model: node.config.model, allowedTools: node.config.allowedTools, signal: ctx.signal, timeoutMs: node.timeoutMs, onEvent: async event => { if (++count <= 1000) await ctx.emit('provider.event', event); } });
       output = { ...result };
     } else return { status: 'failed', error: 'Unsupported execution node' };
     if (ctx.signal.aborted) return { status: 'failed', error: 'Cancelled', output: { ...output, worktree } };
@@ -352,10 +372,10 @@ export class NodalService {
       if (status.authentication === 'missing') throw new Error(`Sign in with ${status.loginCommand ?? (provider === 'claude' ? 'claude auth login' : 'codex login')}, then try again. ${status.message} No model request was made.`);
       const cwd = join(this.dataDir, 'planner'); await mkdir(cwd, { recursive: true, mode: 0o700 });
       const schema = z.toJSONSchema(GraphSchema, { unrepresentable: 'any', target: 'draft-7' });
-      let instruction = `Return ONLY JSON matching this schema: ${JSON.stringify(schema)}. Build a Nodal workflow, never execute commands or modify files. Preserve unrelated nodes and positions. Exactly one start, reachable end, ordinary DAG, bounded quality_gate fail loop edges only. Use explicit command approvals and read-only provider permissions by default. Current graph: ${JSON.stringify(current)}\nUser request: ${prompt}`;
+      let instruction = `Return ONLY JSON matching this schema: ${JSON.stringify(schema)}. Build a Nodal workflow, never execute commands or modify files. Preserve unrelated nodes and positions. ${PLANNING_RULES}\nUse explicit command approvals and read-only provider permissions by default. Current graph: ${JSON.stringify(current)}\nUser request: ${prompt}`;
       for (let attempt = 1; attempt <= 2; attempt++) {
         controller.signal.throwIfAborted();
-        const response = await runProvider({ provider, prompt: instruction, cwd, permissionMode: 'read-only', signal: controller.signal, timeoutMs: 120000, noTools: true, outputSchema: schema, maxTurns: 6 });
+        const response = await runProvider({ provider, prompt: instruction, cwd, permissionMode: 'read-only', signal: controller.signal, timeoutMs: PLANNING_TIMEOUT_MS, noTools: true, outputSchema: schema, maxTurns: 6 });
         controller.signal.throwIfAborted();
         try {
           const text = response.output.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');

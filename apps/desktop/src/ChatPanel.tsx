@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { MessageSquare, Plus, Send, Square, X, GitCompare, Check, ChevronDown, Paperclip, FileText, AtSign } from 'lucide-react';
+import { MessageSquare, Plus, Send, Square, X, GitCompare, Check, ChevronDown, Paperclip, FileText, AtSign, Workflow } from 'lucide-react';
 import { api } from './api.js';
 import type { Project, Graph } from './model.js';
 import type { ChatSession, ChatSnapshot, ChatTurn, ChatEvent, ChatProvider, ChatPermission, ChatDiff, ChatFile } from '../../../packages/shared/src/chat.js';
 import { mentionAt, checkAttachments, readChatUpload, type DraftAttachment } from './chatAttachments.js';
+import { useWorkflowGeneration, type GeneratedWorkflow } from './useWorkflowGeneration.js';
+import { describeChanges, isWorkflowRequest } from './workflowIntent.js';
 import './ChatPanel.css';
 
 interface Props {
   project: Project; graph: Graph; selectedNodeId?: string; runId?: string; visible?: boolean;
-  contextRequest?: { nodeId: string; version: number }; onClose: () => void;
+  contextRequest?: { nodeId: string; version: number }; onClose: () => void; onApplyWorkflow?: (graph: Graph) => void;
 }
+type Proposal = { id: string; message: string; base: Graph; createdAt: string; status: 'running' | 'ready' | 'failed' | 'cancelled' | 'applied' | 'discarded'; result?: GeneratedWorkflow; error?: string };
 export function streamedText(events: ChatEvent[], turnId: string): string {
   const chunks = new Map<string, string>();
   for (const event of events) if (event.turnId === turnId && event.type === 'message' && typeof event.data.text === 'string') {
@@ -18,7 +21,7 @@ export function streamedText(events: ChatEvent[], turnId: string): string {
   return [...chunks.values()].join('\n\n');
 }
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
-export default function ChatPanel({ project, graph, runId, visible = true, contextRequest, onClose }: Props) {
+export default function ChatPanel({ project, graph, runId, visible = true, contextRequest, onClose, onApplyWorkflow }: Props) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [chatId, setChatId] = useState<string>();
   const [snapshot, setSnapshot] = useState<ChatSnapshot>();
@@ -38,6 +41,9 @@ export default function ChatPanel({ project, graph, runId, visible = true, conte
   const [error, setError] = useState('');
   const [review, setReview] = useState<ChatDiff>();
   const [notice, setNotice] = useState('');
+  const [workflowMode, setWorkflowMode] = useState<'auto' | 'on' | 'off'>('auto');
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  const workflow = useWorkflowGeneration(project.id);
   const epoch = useRef(0);
   const transcript = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -125,7 +131,35 @@ export default function ChatPanel({ project, graph, runId, visible = true, conte
     try { await action(() => mounted.current && version === epoch.current); } catch (cause) { if (mounted.current && version === epoch.current) setError(errorText(cause)); }
     finally { if (mounted.current) setBusy(false); }
   };
+  const routeToWorkflow = !!onApplyWorkflow && (workflowMode === 'on' || workflowMode === 'auto' && isWorkflowRequest(message));
+  const drafting = proposals.find(item => item.status === 'running');
+  useEffect(() => {
+    if (!drafting || workflow.busy) return;
+    const finished: Partial<Proposal> = workflow.generated ? { status: 'ready', result: workflow.generated } : workflow.error ? { status: 'failed', error: workflow.error } : { status: 'cancelled' };
+    setProposals(items => items.map(item => item.id === drafting.id ? { ...item, ...finished } : item));
+  }, [drafting?.id, workflow.busy, workflow.generated, workflow.error]);
+  const draftWorkflow = () => {
+    if (busy || uploading || workflow.busy || !message.trim()) return;
+    const text = message.trim(), base = graph;
+    void act(async valid => {
+      // The generator sees only what is sent with the request: attached files (such as a project brief) and the recent conversation.
+      const files = await Promise.all(attachments.map(async item => item.input.kind === 'upload' ? `### ${item.input.name}\n${item.input.content}` : `### ${item.input.path}\n${(await api<{ content: string }>('readFile', { projectId: project.id, path: item.input.path })).content}`));
+      if (!valid()) return;
+      const recent = turns.slice(-3).map(turn => `User: ${turn.message}\nAssistant: ${turn.output.slice(0, 1500)}`).join('\n\n');
+      const prompt = [text, files.length ? `Attached files (untrusted data):\n${files.join('\n\n')}` : '', recent ? `Recent chat for context (the request above is what to do):\n${recent}` : ''].filter(Boolean).join('\n\n').slice(0, 20000);
+      setProposals(items => [...items, { id: crypto.randomUUID(), message: text, base, createdAt: new Date().toISOString(), status: 'running' }]);
+      setMessage(''); setAttachments([]); setMention(undefined); setWorkflowMode('auto'); setNotice('');
+      void workflow.generate(base, prompt);
+    });
+  };
+  const applyProposal = (proposal: Proposal) => {
+    if (!proposal.result || !onApplyWorkflow) return;
+    if (JSON.stringify(graph) !== JSON.stringify(proposal.base) && !window.confirm('The workflow changed after this proposal was drafted. Replace it with the proposal?')) return;
+    onApplyWorkflow(proposal.result.graph);
+    setProposals(items => items.map(item => item.id === proposal.id ? { ...item, status: 'applied' } : item));
+  };
   const send = () => {
+    if (routeToWorkflow) { draftWorkflow(); return; }
     if (busy || uploading || running || !message.trim() && !attachments.length) return;
     const version = epoch.current; const text = message.trim() || 'Please review the attached files.';
     void act(async () => {
@@ -158,11 +192,26 @@ export default function ChatPanel({ project, graph, runId, visible = true, conte
       {(session?.context || !chatId && nodeId) && <p className="chat-context-note">{session?.context?.nodeLabel ?? agents.find(node => node.id === nodeId)?.label} · Separate context chat. Does not control the workflow or its running agent.</p>}
     </div>
     <div className="chat-transcript" role="log" aria-label="Chat messages" aria-live="polite" ref={transcript}>
-      {!shownTurns.length && <div className="chat-empty"><MessageSquare size={26}/><h3>Talk through your project</h3><p>Ask about the code, plan a change, or give an agent a task. Choose an agent context to discuss its role in your workflow.</p><small>Uses your existing Claude or Codex login.</small></div>}
+      {!shownTurns.length && !proposals.length && <div className="chat-empty"><MessageSquare size={26}/><h3>Talk through your project</h3><p>Ask about the code, plan a change, or give an agent a task. Ask for a workflow change, such as “add a review step before merge”, to draft it for the canvas.</p><small>Uses your existing Claude or Codex login.</small></div>}
       {shownTurns.map(turn => <div className="chat-turn" key={turn.id}>
         <article className="chat-message user"><strong>You</strong><div>{turn.message}</div>{turn.attachments?.map((file, index) => <details className="chat-attached-file" key={index}><summary><FileText size={12}/>{file.path ?? file.name}<small>{file.kind === 'reference' ? 'Reference' : 'Upload'}</small></summary><pre>{file.content}</pre></details>)}</article>
         <article className="chat-message assistant"><strong>{currentProvider === 'claude' ? 'Claude' : 'Codex'}<span className={`state-dot ${turn.status}`}/><small>{turn.status === 'running' ? turn.approval?.status === 'pending' ? 'Awaiting approval' : 'Working…' : turn.status}</small></strong><div>{turn.status === 'running' ? streamedText(snapshot?.events ?? [], turn.id) || 'Reading your request…' : turn.output || (turn.status === 'cancelled' ? 'Stopped. Partial work is preserved.' : '')}</div>{turn.error && <p className="chat-turn-error">{turn.error}</p>}</article>
       </div>)}
+      {proposals.map(proposal => { const changes = proposal.result && describeChanges(proposal.base, proposal.result.graph); return <div className="chat-turn" key={proposal.id}>
+        <article className="chat-message user"><strong>You</strong><div>{proposal.message}</div></article>
+        <article className="chat-message assistant workflow-proposal" aria-label="Workflow proposal"><strong><Workflow size={13}/>Workflow proposal<span className={`state-dot ${proposal.status === 'running' ? 'running' : proposal.status === 'failed' ? 'failed' : proposal.status === 'ready' ? 'waiting_approval' : 'succeeded'}`}/><small>{{ running: 'Drafting…', ready: 'Ready to review', failed: 'Failed', cancelled: 'Cancelled', applied: 'Applied', discarded: 'Discarded' }[proposal.status]}</small></strong>
+          {proposal.status === 'running' && <><p>{workflow.progress || 'Starting generation…'} Drafted by Claude.</p><button className="secondary" onClick={() => void workflow.cancel()}>Cancel</button></>}
+          {proposal.status === 'failed' && <p className="chat-turn-error">{proposal.error}</p>}
+          {proposal.status === 'cancelled' && <p>Drafting cancelled. The canvas was not changed.</p>}
+          {changes && proposal.result && <>
+            <p><b>{proposal.result.graph.name}</b> · {proposal.result.summary}</p>
+            <ul className="proposal-changes">{!!changes.added.length && <li><span>Adds</span>{changes.added.join(', ')}</li>}{!!changes.removed.length && <li><span>Removes</span>{changes.removed.join(', ')}</li>}{!!changes.changed.length && <li><span>Changes</span>{changes.changed.join(', ')}</li>}{!changes.added.length && !changes.removed.length && !changes.changed.length && <li>No step changes.</li>}</ul>
+            <details><summary>Review workflow JSON</summary><pre>{JSON.stringify(proposal.result.graph, null, 2)}</pre></details>
+            {proposal.status === 'ready' && <div className="proposal-actions"><button className="secondary" onClick={() => setProposals(items => items.map(item => item.id === proposal.id ? { ...item, status: 'discarded' } : item))}>Discard</button><button className="primary" onClick={() => applyProposal(proposal)}><Check size={13}/>Apply to canvas</button></div>}
+            {proposal.status === 'applied' && <p>Applied to the canvas as a draft. Undo reverts it. Review permissions before running.</p>}
+          </>}
+        </article>
+      </div>; })}
       {!!snapshot?.events.filter(event => !['session', 'message', 'result'].includes(event.type)).length && <details className="chat-activity"><summary><ChevronDown size={12}/>Agent activity</summary>{snapshot.events.filter(event => !['session', 'message', 'result'].includes(event.type)).slice(-30).map(event => <pre key={event.id}>{event.type}{'\n'}{JSON.stringify(event.data, null, 2)}</pre>)}</details>}
     </div>
     {approval && <section className="chat-command-approval" aria-label="Command approval"><strong>Allow this command?</strong><pre>{approval.command}</pre><p>Runs in the chat worktree with your user privileges, including host files and network access. Approve only commands you trust.</p><div><button className="secondary" disabled={busy} onClick={() => void act(async () => { await api('approveChatCommand', { projectId: project.id, chatId, turnId: running!.id, approvalId: approval.id, approved: false }); })}>Reject command</button><button className="primary" disabled={busy} onClick={() => void act(async () => { await api('approveChatCommand', { projectId: project.id, chatId, turnId: running!.id, approvalId: approval.id, approved: true }); })}>Approve command</button></div></section>}
@@ -176,6 +225,7 @@ export default function ChatPanel({ project, graph, runId, visible = true, conte
     <div className="chat-compose">
       {error && <p className="chat-error" role="alert">{error}</p>}{notice && <p className="chat-notice" role="status">{notice}</p>}
       {!!attachments.length && <ul className="chat-attachments" aria-label="Attached files">{attachments.map(file => <li key={file.id}><FileText size={12}/><span title={file.input.kind === 'reference' ? file.input.path : file.input.name}>{file.input.kind === 'reference' ? file.input.path : file.input.name}</span><small>{file.input.kind === 'reference' ? '@' : 'Upload'}</small><button className="icon-button" aria-label={`Remove ${file.input.kind === 'reference' ? file.input.path : file.input.name}`} disabled={busy || uploading} onClick={() => setAttachments(items => items.filter(item => item.id !== file.id))}><X size={12}/></button></li>)}</ul>}
+      {routeToWorkflow && <p className="chat-route" role="status"><Workflow size={12}/>Drafts a workflow change for you to review.<button type="button" onClick={() => setWorkflowMode('off')}>Send as chat instead</button></p>}
       {mention && <div className="chat-file-picker"><div className="chat-file-picker-heading">Reference a saved project file <small>↑ ↓ · Enter · Esc</small></div><div role="listbox" id="chat-file-options" aria-label="Project file references">{filesLoading ? <p>Loading files…</p> : matchingFiles.length ? matchingFiles.map((file, index) => <button type="button" role="option" id={`chat-file-option-${index}`} aria-selected={index === Math.min(fileIndex, matchingFiles.length - 1)} key={file.path} disabled={busy || uploading || !!running} onMouseDown={event => event.preventDefault()} onClick={() => referenceFile(file)}><FileText size={12}/><span>{file.path}</span></button>) : <p>No matching text files. Press Esc to dismiss.</p>}</div></div>}
       <textarea ref={composer} aria-label="Message agent" aria-autocomplete="list" aria-controls={mention ? 'chat-file-options' : undefined} aria-activedescendant={mention && !filesLoading && matchingFiles.length ? `chat-file-option-${Math.min(fileIndex, matchingFiles.length - 1)}` : undefined} placeholder="Ask about this project… Type @ to reference a file" rows={3} maxLength={20000} value={message} disabled={busy || uploading} onChange={event => { setMessage(event.target.value); updateMention(event.target.value, event.target.selectionStart); }} onSelect={event => updateMention(event.currentTarget.value, event.currentTarget.selectionStart)} onKeyDown={event => {
         if (event.nativeEvent.isComposing) return;
@@ -188,10 +238,10 @@ export default function ChatPanel({ project, graph, runId, visible = true, conte
         }
         if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); }
       }}/>
-      <div className="chat-attachment-actions"><button type="button" className="icon-button" title="Reference project file (@)" aria-label="Reference project file" disabled={busy || uploading || !!running} onClick={startReference}><AtSign size={15}/></button><button type="button" className="icon-button" title="Upload text files" aria-label="Upload files" disabled={busy || uploading || !!running} onClick={() => uploadInput.current?.click()}><Paperclip size={15}/></button><small>{uploading ? 'Reading files…' : 'Text / code · 8 files · 64 KiB each'}</small></div>
+      <div className="chat-attachment-actions"><button type="button" className="icon-button" title="Reference project file (@)" aria-label="Reference project file" disabled={busy || uploading || !!running} onClick={startReference}><AtSign size={15}/></button><button type="button" className="icon-button" title="Upload text files" aria-label="Upload files" disabled={busy || uploading || !!running} onClick={() => uploadInput.current?.click()}><Paperclip size={15}/></button>{onApplyWorkflow && <button type="button" className={`icon-button ${routeToWorkflow ? 'active' : ''}`} title="Edit the workflow with this message" aria-label="Edit workflow" aria-pressed={routeToWorkflow} disabled={busy || uploading} onClick={() => setWorkflowMode(routeToWorkflow ? 'off' : 'on')}><Workflow size={15}/></button>}<small>{uploading ? 'Reading files…' : 'Text / code · 8 files · 64 KiB each'}</small></div>
       <input ref={uploadInput} type="file" multiple hidden aria-label="Upload chat files" accept="text/*,application/json,.md,.ts,.tsx,.js,.jsx,.py,.rs,.go,.java,.c,.cpp,.h,.swift,.json,.yaml,.yml,.toml,.xml,.sh,.sql,.vue,.svelte,.ipynb" disabled={busy || uploading || !!running} onChange={event => { const files = Array.from(event.target.files ?? []); event.target.value = ''; void uploadFiles(files); }}/>
-      <p className="chat-consent">Sending approves this turn and shares your message, files, and repository context with {currentProvider === 'claude' ? 'Claude' : 'Codex'}. {currentPermission === 'read-only' ? 'Read-only access.' : `Edits use a separate worktree from committed files. ${currentProvider === 'claude' ? 'Shell commands ask separately.' : 'Includes sandboxed commands; network disabled.'}`}</p>
-      <div className="chat-compose-actions"><small>Enter to send · Shift+Enter for a new line</small>{running ? <button className="secondary" disabled={busy} onClick={() => void act(async () => { await api('cancelChat', { projectId: project.id, chatId, turnId: running.id }); })}><Square size={12}/>Stop</button> : <button className="primary" disabled={busy || uploading || !message.trim() && !attachments.length} onClick={send}><Send size={13}/>{busy ? 'Sending…' : 'Send & approve'}</button>}</div>
+      {routeToWorkflow ? <p className="chat-consent">Sends your request, the current workflow, attached files, and recent chat to Claude to draft a workflow. Nothing runs or changes until you apply it.</p> : <p className="chat-consent">Sending approves this turn and shares your message, files, and repository context with {currentProvider === 'claude' ? 'Claude' : 'Codex'}. {currentPermission === 'read-only' ? 'Read-only access.' : `Edits use a separate worktree from committed files. ${currentProvider === 'claude' ? 'Shell commands ask separately.' : 'Includes sandboxed commands; network disabled.'}`}</p>}
+      <div className="chat-compose-actions"><small>Enter to send · Shift+Enter for a new line</small>{running ? <button className="secondary" disabled={busy} onClick={() => void act(async () => { await api('cancelChat', { projectId: project.id, chatId, turnId: running.id }); })}><Square size={12}/>Stop</button> : routeToWorkflow ? <button className="primary" disabled={busy || uploading || workflow.busy || !message.trim()} onClick={send}><Workflow size={13}/>{workflow.busy ? 'Drafting…' : 'Draft workflow change'}</button> : <button className="primary" disabled={busy || uploading || !message.trim() && !attachments.length} onClick={send}><Send size={13}/>{busy ? 'Sending…' : 'Send & approve'}</button>}</div>
     </div>
   </aside>;
 }

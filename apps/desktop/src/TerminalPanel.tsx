@@ -145,7 +145,7 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, Props>(function TerminalPa
       try {
         const session = await api<TerminalSession>('createTerminal', { ...owner.scope, cols: 80, rows: 24 });
         if (!alive(owner)) { await api('closeTerminal', { ...owner.scope, terminalId: session.id }); return; }
-        const terminal = new Terminal({ cols: session.cols, rows: session.rows, fontFamily: "'SF Mono', Menlo, Consolas, monospace", fontSize: 12, scrollback: 5000, cursorBlink: true, theme: { background: '#181818', foreground: '#cccccc', cursor: '#e7e7e7', selectionBackground: '#264f78' } });
+        const terminal = new Terminal({ cols: session.cols, rows: session.rows, fontFamily: "'Fragment Mono', 'SF Mono', Menlo, Consolas, monospace", fontSize: 12, scrollback: 5000, cursorBlink: true, theme: { background: '#0c0c0e', foreground: '#d2d1cc', cursor: '#d9b45b', cursorAccent: '#060607', selectionBackground: '#d9b45b40' } });
         const fit = new FitAddon(); terminal.loadAddon(fit);
         const entry: Entry = { session, terminal, fit, cursor: 0, disposed: false, input: '', writing: false, resizing: false, inputListener: { dispose() {} } };
         entry.inputListener = terminal.onData(data => {
