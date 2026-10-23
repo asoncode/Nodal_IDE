@@ -14,6 +14,10 @@ It's an early, working version. The core editing and workflow features are in pl
 - **Chat with Claude or Codex.** Open the chat sidebar for a repository conversation, or start a separate chat using a workflow agent’s context.
 - **Run Claude and Codex.** Give each agent its instructions and permissions, then review the request before it starts.
 - **Give agents specialist roles.** Configure expertise, reference files, owned paths, skills, and named handoffs. Save roles in the project library and reuse them without changing existing workflows.
+- **Give each specialist its own workflow.** A role node contains a playbook, such as orient, plan, implement, test, and self-review. Double-click it to open and edit that inner workflow.
+- **Use deterministic steps.** Search code, list or read files, check Git history, find affected tests, or validate a contract without a model call or an approval prompt.
+- **Improve workflows over time.** The workflow orchestrator pauses runs that keep failing the same way, summarizes each run, and proposes measured changes that you approve.
+- **Reuse workflows across projects.** Save workflows, roles, and lessons to a library folder, then apply them to another project with its own folders and test command.
 - **Review code before applying it.** Coding attempts run in separate Git worktrees. Inspect their diffs and explicitly approve changes before bringing them into your checkout.
 - **Keep track of what happened.** View streamed output, approvals, attempts, and saved run history. Replay a past run without executing it again.
 
@@ -27,7 +31,23 @@ Each agent can use Claude or Codex and its own model. The planning request curre
 
 During a run, Claude checks owned paths before edits; both adapters check the final changes before publishing an attempt. Required handoff files must exist and pass their declared JSON schema. Consumers receive verified handoffs, and replay records supplied context and available usage. These checks supplement provider permissions and do not create an operating-system sandbox.
 
-The **Specialist Team** template demonstrates contracts, parallel specialists, separate test gates, integration, independent review, and human approval. Adapt its paths and Node test commands to your repository before running it. This release uses ordinary agent nodes for specialists. Nested playbooks, automatic owner-routed repairs, consults, the supervising orchestrator, and the portable cross-project library are still planned; see [Known limitations](KNOWN_LIMITATIONS.md).
+The **Specialist Team** template demonstrates contracts, parallel specialists, separate test gates, integration, independent review, and human approval. **Specialist Team with playbooks** goes further: each specialist is a role node with its own playbook, the architect records design decisions, and integration failures go back to the specialist that owns the failing files. Adapt both templates' paths and Node test commands to your repository before running them.
+
+### How specialists work together
+
+- **Playbooks.** A role node runs its playbook as part of the run. Its steps work as the role, and everything the playbook changes, including changes made by its commands, must stay within the role's owned paths before its work is published.
+- **Tool steps.** Add a Tool step to search code, find symbols, list or read files, read Git history, find tests affected by a change, validate a file against a JSON schema, or read an earlier step's full output. Tools read the step's commit, so the same inputs always give the same result, and results are cached.
+- **Owner routing.** Set a quality gate to send failures to the roles that own the failing files. Connect a loop from the gate to each specialist and choose a fallback for failures no file path explains.
+- **Consults.** A role can ask another role a question by ending its reply with a consult block. The answer is read-only, needs approval like any provider request, and at most two are allowed per step.
+- **Verified facts.** Each role's prompt includes the ownership map, verified contracts, latest test results, recorded decisions, and an index of the code in its area. These facts come from the run, never from model summaries.
+
+### Improve a workflow
+
+Open **Workflow orchestrator** in the activity bar. During a run it pauses when a looping gate fails twice with the same evidence or the run nears its attempt limit, and it writes a summary when the run ends. After at least two runs of a saved workflow, it shows each step's attempts, failures, timeouts, and cost, and proposes specific changes with their evidence. **Apply as new revision** saves the change; later runs compare before and after, and **Revert** restores the previous revision. Lessons you add under **Project memory** are sent to the planner and every role.
+
+### Reuse a workflow in another project
+
+Open **Library**, choose the folder to use, and save the current workflow. Choose which folders and test commands become parameters. In another project, select the item, check the detected values, preview it, and apply it to the canvas. Nodal records which version you imported and offers newer versions as previewed updates. Library items are untrusted: they are validated, never run on import, and their commands still ask for approval. See [Known limitations](KNOWN_LIMITATIONS.md).
 
 ## Run from source
 

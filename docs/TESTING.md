@@ -2,7 +2,7 @@
 
 ## Automated checks
 
-`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 239 unit/integration/UI cases.
+`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 361 unit/integration/UI cases.
 
 Coverage includes deterministic predicate evaluation, graph validation and templates, topological readiness, skipped branches, parallel concurrency, all join policies, retry readiness races, bounded loops with feedback evidence, iteration limits, cancellation during delayed retries, pause/resume boundaries, node/run timeout, approvals, journal failures, and interruption recovery.
 
@@ -84,3 +84,11 @@ tests exercise required outputs, JSON schema failures and changed consumer
 artifacts. Claude hook tests check tool-time ownership and read-before-edit.
 Role-library tests check project boundaries and pinned snapshots. Unknown usage
 stays unknown; no token estimate is presented as provider telemetry.
+
+## Tool, playbook, and orchestration checks
+
+Tool tests run every tool against real temporary repositories and confirm identical results for the same commit, scoped and credential-free listings, schema validation failures, and caching across runs. Playbook tests run a role node end to end with real worktrees: inner tool, agent, command, and gate steps, a bounded inner loop, role-level handoff verification, and an ownership failure caused by an inner command. Validation tests cover invalid playbooks, inner test gates versus team-level gates, overlapping parallel ownership, and step-output sources.
+
+Routing tests run two parallel specialists, a merge, and an integration test that names one specialist's file, and check that only that specialist re-runs. Collaboration tests cover a consult answered read-only, the two-consult cap, unknown roles, decision records, and ledger contents. Context tests run the same workflow with context economy on and off and compare the executed steps, commands, and gates; they also cover digests, per-layer usage, and session resume with fallback.
+
+Orchestrator tests pause a run on a repeated identical failure, write run summaries, and walk a proposal through evidence, application, comparison, and exact revert. Library tests export a Node workflow and import it into a Python project with bound and detected values, publish a second version without changing the first, and reject invalid files, credentials, and undeclared placeholders. All provider calls in these tests are mocked.

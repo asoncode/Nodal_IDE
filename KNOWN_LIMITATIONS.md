@@ -2,15 +2,41 @@
 
 Nodal implements a functional local MVP. The following specification items remain partial or incomplete.
 
-## Updated team specification (sections 5A–5F)
+## Specialist teams, tools, orchestrator, and library (spec sections 5A–5F)
 
-- Phase 8a and the team-first planning path in 8b are implemented: inline role snapshots, project role CRUD, bounded repository knowledge, expertise/skills prompts, file ownership checks, selected brief files, editable team review, approved provider/model assignments, and specialist graph validation. The Specialist Team template uses flat agent nodes with independent test gates. Its repository layout and commands are examples to adapt, not an automatic project bootstrap.
-- The handoff portion of 8c is implemented: required files and supported JSON schemas are validated, hashes and source commits are recorded, and consumers reject missing or changed upstream artifacts. External schema references/formats must be supported by the validator; unsupported schemas fail rather than silently bypassing validation. Owner-routed repair loops, read-only role consults, validated decision records, and a complete verified-facts ledger are not implemented.
-- Knowledge sources are repository-relative files, directories, or simple globs (`*`, `**`, `?`); outside-repository knowledge approval is not implemented and absolute paths are rejected. Knowledge retrieval currently selects bounded matching files rather than semantic search. Skills are inline instruction packs, not separately versioned library items. Role overrides are edited as snapshots.
-- Claude checks role ownership and requires a current file read before overwriting existing files. Codex ownership is checked after execution, including provider-created commits and untracked files. The Codex SDK does not expose a reliable hook to enforce read-before-edit or prevent every out-of-scope write at tool time; rejected attempts remain in isolated worktrees for inspection. Neither adapter is a hardened sandbox for hostile repository content.
-- Prompt layers and replay usage reporting are implemented for role-bearing workflow agents. Provider-omitted input/output/cached token and cost values remain unknown. A full deterministic repository index, per-layer token accounting, distant-ancestor digests, context-on/off verification comparisons, and the ledger tables are future work. Retry session resume remains off.
-- Phase 9 deterministic tool nodes, cached lookups, composite role nodes/playbooks and drill-in execution are not implemented. Phase 10's workflow orchestrator, bounded consult brokerage, metrics-backed improvement proposals, approved version changes and project memory are not implemented. Phase 11's portable folder library, parameter binding, provenance and upgrade workflow are not implemented. The current project role library is not that portable library.
-- New role and team behavior is verified with mocked providers and real temporary repositories. Live paid provider turns are not run by the automated suite. The existing approvals, tests, isolation and merge checks continue to run; role and context features do not authorize skipping them.
+Phases 8–11 and context economy are implemented. These are their current limits.
+
+**Roles and team planning (8a, 8b)**
+- Knowledge sources are repository-relative files, directories, or simple globs (`*`, `**`, `?`). Outside-repository knowledge and its approval flow are not implemented; absolute paths are rejected. Retrieval selects bounded matching files, not semantic search. Skills are inline instruction packs inside roles. Role overrides are edited as snapshots.
+- Claude checks role ownership and requires a current file read before overwriting existing files. Codex ownership is checked after execution, including provider-created commits and untracked files. The Codex SDK has no reliable hook to enforce read-before-edit or block every out-of-scope write at tool time; rejected attempts stay in isolated worktrees for inspection. Neither adapter is a hardened sandbox for hostile repository content.
+- The two Specialist Team templates use example paths and Node test commands; adapt them to the repository. They are not a project bootstrap.
+
+**Collaboration (8c)**
+- Owner routing attributes a failure only through repository file paths in the failing output or review findings (full paths, or file names that are unique in the repository). It does not map stack frames, symbols, or test names to owners. Unattributed failures go to the gate's fallback target.
+- Consults happen between turns: a role ends its reply with a consult block, Nodal answers it with a read-only provider turn, and the asking role continues in a fresh provider call in the same worktree. Consults cannot interrupt a provider mid-tool-call. At most two per step; each needs approval like any provider request.
+- Decision records are validated against a built-in schema when a handoff named `decisions` declares no schema of its own. The verified-facts ledger contains computed and validated facts only; it does not summarize prose.
+
+**Deterministic steps and role playbooks (Phase 9)**
+- Tool steps read Git objects at a pinned commit. `symbols` uses per-language line heuristics, not a compiler or language server. `test-impact` is approximate (test file names and references). `search` with `regex` uses POSIX extended expressions (Git's `-E`), not JavaScript syntax. Very large trees can exceed the 4 MB capture limit and fail rather than return partial listings.
+- Playbooks allow start, end, agent, command, tool, condition, and quality_gate steps on one code lineage: no parallel branches, merges, approvals, or nested roles inside a role. Nesting is two levels (team, then role).
+- Steps inside a playbook ask for approvals like top-level steps. Pausing the run does not pause a playbook that is already executing; stopping does.
+
+**Context economy (5F)**
+- Per-layer context size is recorded in characters, because providers report tokens only for the whole request. Provider-omitted token and cost values stay unknown.
+- Session resume on retries is off by default. When enabled, a retry runs in a new worktree based on the previous attempt's commit, so a resumed session's earlier file views may be stale; the prompt tells the agent to re-read files. Resume falls back to a fresh turn on any error.
+
+**Orchestrator (Phase 10)**
+- Supervision and proposals are rule-based; no model writes proposals or summaries. Rules cover loop exhaustion, timeouts, flaky tests (failed then passed on the same commit), and repeated ownership violations. Proposals need two runs of the current revision.
+- Budget reallocation between roles is not implemented: Nodal has no per-role budgets, and global attempt, time, and iteration limits apply. Escalations pause the run; they do not change it.
+- The supervisor observes team-level steps. Steps inside role playbooks are bounded by their own gates and the role's timeout, and are summarized through the role's result.
+- Before/after comparison uses success rate and attempts per run; it is evidence, not a statistical test.
+
+**Library (Phase 11)**
+- The library holds workflows, roles, and lessons. Skills travel inside roles rather than as separate items.
+- Parameters are directories (exact paths and path prefixes) and whole command lines. Prose such as instructions is never rewritten, so a project-specific name inside instructions stays as written. Command values are split on whitespace without a shell; quoting is not interpreted.
+- Nodal reads and writes the library folder but does not run Git there; commit, push, and pull it yourself to share. Versions are append-only files; Nodal never edits or deletes existing versions.
+
+New role, team, tool, playbook, routing, consult, orchestrator, and library behavior is verified with mocked providers and real temporary Git repositories. Live paid provider turns are not part of the automated suite. Existing approvals, tests, isolation, and merge checks still run; none of these features authorizes skipping them.
 
 ## Execution and recovery
 

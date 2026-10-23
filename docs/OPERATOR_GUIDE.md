@@ -44,6 +44,18 @@ invalid schemas, changed handoffs, or edits outside ownership fail the attempt;
 inspect the recorded policy evidence and preserved worktree. Changing a role's
 scope requires editing the draft and starting a new run.
 
+## Playbooks, tools, and routing
+
+Double-click a role node, or choose **Open playbook** in its inspector, to edit its inner workflow. Connecting a gate's fail port back to an earlier step creates a bounded loop. Inner agents work as the role; set each one's provider, model, and permission there. Tool steps need no approval; commands and provider requests inside a playbook still ask.
+
+To route integration failures to owners, add a loop edge from the gate to each specialist, set **When this gate fails** to **Send to the roles that own the failing files**, and choose a fallback. Failing test output must name repository paths for routing to work; otherwise the fallback runs. Replay shows each routing decision with the matched paths.
+
+## Orchestrator and library
+
+When the orchestrator pauses a run, the status bar explains why. Review the failing evidence, adjust instructions or ownership in the draft if needed, then resume or stop. Proposals appear only after two runs of the current revision show the same problem; a proposal that widens a role's ownership asks for confirmation. Revert is available only while the applied revision is still current.
+
+The library folder defaults to `~/Nodal/Library`. Keep it in Git to share it. When importing, check every detected value: directory parameters fill paths, and command parameters become a command and arguments split on spaces.
+
 ## Troubleshooting
 
 | Symptom | Action |

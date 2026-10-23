@@ -218,9 +218,8 @@ interface AgentProvider {
 
 A workflow is a team of specialists working inside the full engineering lifecycle. This section defines what a role is, how the planner staffs a team, how roles collaborate, and how the team fits with testing, reviews, and approvals.
 
-### Current state and gap (as of the first Nodal release)
-- **What works:** each agent starts from the code its nearest upstream coding step committed, receives a structured summary of all earlier results (agent responses first, then failing test output, then log tails), and on a quality-loop retry receives the failing evidence. Parallel branches, joins, merges, bounded loops, and review gates are supported.
-- **What is missing:** an agent node holds only provider, model, one instruction field, permission, and a tool list. Nothing models expertise, reference knowledge, ownership, or handoffs. The planner sees only the typed prompt and current graph, never the project brief. As a result, generated graphs collapse implementation into one generic node surrounded by tests and reviews.
+### Status
+Sections 5A–5F are implemented in Nodal: role snapshots and the project role library, team-first planning, verified handoffs, owner-routed failures, consults, decision records, the verified-facts ledger, tool steps, role playbooks, the orchestrator, the library, and context economy. Before this work, agent nodes held only provider, model, instructions, permission, and tools, and generated graphs collapsed implementation into one generic node. Current limits are listed in `KNOWN_LIMITATIONS.md`.
 
 ### Role model
 Extend the agent node with a `role`, stored in a reusable project role library so a role can appear in many workflows:

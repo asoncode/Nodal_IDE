@@ -107,9 +107,63 @@ parallel ownership, and required machine-test gates as well as DAG wiring.
 Handoffs are repository artifacts validated before producer success and checked
 again in the consumer's code lineage. Prompt context is bounded and ordered;
 the replay records supplied context and reports unavailable provider usage as
-unknown. Session resume stays disabled. Later phases add deterministic tool
-nodes, nested role playbooks, supervised improvement proposals, and a portable
-cross-project library; these must not be represented by cosmetic controls.
+unknown.
+
+### Tool steps and role playbooks
+
+Tool nodes run in the runtime without a provider. They read Git objects at the
+step's pinned commit (`git grep`, `ls-tree`, `show`, `log`, `diff`, `blame`) through
+the argument-array Git runner, so they cannot modify anything and repeat exactly
+for a commit. Results are cached by tool, configuration, and commit; file indexes
+are cached by blob SHA, which identifies exact file contents.
+
+A role node carries a role and a playbook. The runtime expands the playbook into
+a child graph with IDs prefixed `role/step` and runs it with a second
+`WorkflowEngine` inside the role's attempt. The child shares the run ID, inherits
+the role's starting commit, and is capped by the run's remaining attempts and the
+role's timeout. Its run-level events are renamed `role.run.*` so they cannot
+change the parent run's status. After the playbook succeeds, ownership is checked
+for everything it changed since the role started, then produced handoffs are
+verified at the role's final commit. Validation checks each playbook as its own
+graph; a coding role needs a test gate inside the playbook or after the role.
+
+### Collaboration
+
+An owner-routed quality gate may loop to several role steps. On failure the
+engine asks the runtime for targets; the runtime matches repository paths in the
+failing evidence against role ownership at the failing commit and records
+`loop.routed`. Only the chosen loop regions reset; unattributed failures use the
+gate's fallback. Consults are parsed from the end of a role's reply, answered by
+an approved read-only provider turn in the consulted role's context, recorded in
+`consults`, and capped at two per step. Each role prompt is assembled in fixed
+layers (platform, ledger, role, memory, task, evidence); the ledger contains only
+computed facts (ownership, verified contracts, test results, validated
+decisions, a code index) and is snapshotted per attempt. Distant ancestors arrive
+as digests; nearest upstream workers arrive in full. `contextEconomy: false`
+sends plain prompts without changing verification. `resumeOnRetry` is off by
+default and falls back to a fresh turn on any error.
+
+### Orchestrator
+
+Each run gets a `Supervisor` that observes team-level events. It pauses the
+engine (never edits the run) when a looping gate fails twice with the same
+normalized evidence or the run reaches 80% of its attempt budget, and the runtime
+records a deterministic run summary at completion. Between runs, metrics and
+proposals are computed from stored attempts and events of the current revision.
+Applying a proposal re-checks the revision and every changed value, validates
+the result, saves a new revision, and records a lesson. Revert restores the base
+revision's stored content as a new revision. Lessons are stored per project and
+included in planner context and role prompts.
+
+### Library
+
+The library is a folder of versioned JSON items (`<kind>s/<slug>/<version>.json`)
+read and written by the runtime, never the renderer. Export replaces declared
+directory and command values with placeholders; import detects defaults from the
+target project, requires every parameter, re-validates the content as untrusted
+input, and returns a preview. Workflows record their origin and bindings so newer
+versions can be offered as previewed updates. Existing versions are never
+overwritten.
 
 ## Verification boundary
 

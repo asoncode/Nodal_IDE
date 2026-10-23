@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createNode, GraphSchema, type Graph, type WorkflowNode } from '../../shared/src/index.js';
 import { validateGraph } from '../src/validation.js';
 import { playbookGraph, type RoleNode } from '../src/playbook.js';
+import { specialistPlaybookTeam } from '../src/templates.js';
 
 function role(id: string, owns: string[]): RoleNode {
   const node = createNode('role', id) as RoleNode;
@@ -61,5 +62,13 @@ describe('role nodes', () => {
     const tool = createNode('tool', 'read');
     if (tool.kind === 'tool') tool.config = { tool: 'step-output', nodeId: 'end' };
     expect(codes(team(tool))).toContain('tool_source');
+  });
+  it('ships a valid playbook team template with owner-routed integration failures', () => {
+    expect(validateGraph(specialistPlaybookTeam).errors).toEqual([]);
+    expect(specialistPlaybookTeam.nodes.filter(node => node.kind === 'role').map(node => node.label)).toEqual(['Spatial intelligence engineer', 'Simulation engineer', 'UI engineer']);
+    const gate = specialistPlaybookTeam.nodes.find(node => node.id === 'integration-gate');
+    expect(gate?.kind === 'quality_gate' && gate.config).toMatchObject({ routing: 'owner', fallbackTargetId: 'integration' });
+    expect(specialistPlaybookTeam.edges.filter(edge => edge.source === 'integration-gate' && edge.kind === 'loop').map(edge => edge.target).sort()).toEqual(['integration', 'simulation', 'spatial', 'ui']);
+    expect(specialistPlaybookTeam.edges.some(edge => edge.kind === 'artifact' && edge.target === 'simulation')).toBe(true);
   });
 });
