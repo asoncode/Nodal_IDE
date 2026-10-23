@@ -15,6 +15,7 @@ import { ChatRuntime } from './chat.js';
 import { upstreamContext } from './context.js';
 import { runTool, type ToolOutput } from './tools.js';
 import { playbookGraph, type RoleNode } from '../../core/src/playbook.js';
+import { Supervisor, applyChanges, compareProposal, proposeImprovements, runSummary, workflowMetrics } from './orchestrator.js';
 import { TerminalRuntime } from './terminals.js';
 import type { GenerationResult, GenerationSnapshot } from '../../shared/src/generation.js';
 import { PlanningOptionsSchema, TeamPlanSchema, type PlanningOptions } from '../../shared/src/team.js';
@@ -91,6 +92,11 @@ const requestSchemas = {
   inspectGeneration: projectParams.extend({ generationId: id }),
   cancelGeneration: projectParams.extend({ generationId: id }),
   applyChanges: runParams.extend({ nodeId: id, expectedHead: id, expectedSourceHead: id, approved: z.literal(true) }),
+  workflowInsights: projectParams.extend({ graphId: id }),
+  applyProposal: projectParams.extend({ proposalId: id }), dismissProposal: projectParams.extend({ proposalId: id }), revertProposal: projectParams.extend({ proposalId: id }),
+  lessons: projectParams,
+  saveLesson: projectParams.extend({ lessonId: id.optional(), text: z.string().trim().min(1).max(2000) }),
+  deleteLesson: projectParams.extend({ lessonId: id }),
   createChat: projectParams.extend({ provider: z.enum(['claude', 'codex']), model: z.string().trim().min(1).max(200).optional(), permission: z.enum(['read-only', 'scoped-edit']).default('read-only'), context: z.object({ graph: GraphSchema, nodeId: id, runId: id.optional() }).strict().optional() }),
   chats: projectParams, inspectChat: chatParams,
   chatFiles: projectParams,
@@ -195,6 +201,20 @@ export class NodalService {
         const result = await workspace.writeFile(this.store.project(projectId).root, params.path as string, params.content as string, params.expectedHash as string);
         return { ...result, content: params.content, path: params.path };
       }
+      case 'workflowInsights': return this.insights(projectId, params.graphId as string);
+      case 'applyProposal': return this.applyProposal(projectId, params.proposalId as string);
+      case 'dismissProposal': { const proposal = this.store.proposal(projectId, params.proposalId as string); if (proposal.status !== 'open') throw new Error('Only open proposals can be dismissed.'); proposal.status = 'dismissed'; this.store.updateProposal(proposal); return proposal; }
+      case 'revertProposal': return this.revertProposal(projectId, params.proposalId as string);
+      case 'lessons': return this.store.lessons(projectId);
+      case 'saveLesson': {
+        const existing = params.lessonId ? this.store.lessons(projectId).find(lesson => lesson.id === params.lessonId) : undefined;
+        if (params.lessonId && !existing) throw new Error('Lesson not found.');
+        const text = params.text as string;
+        if (redact(text) !== text) throw new Error('Lessons must not contain credentials.');
+        const now = new Date().toISOString();
+        return this.store.saveLesson({ ...(existing ?? { id: randomUUID(), projectId, source: 'user', createdAt: now }), text, updatedAt: now });
+      }
+      case 'deleteLesson': this.store.deleteLesson(projectId, params.lessonId as string); return { deleted: true };
       case 'listRoles': return this.store.roles(projectId);
       case 'saveRole': return this.store.saveRole(projectId, validateRole(params.role as Role));
       case 'deleteRole': this.store.deleteRole(projectId, params.roleId as string); return { deleted: true };
@@ -245,7 +265,10 @@ export class NodalService {
     const runId = randomUUID();
     const run: StoredRun = { id: runId, projectId, graph, status: 'queued', createdAt: new Date().toISOString(), repositorySha: repo.head, parentRunId, nodeStates: {} };
     this.store.createRun(run);
-    const engine = new WorkflowEngine(graph, {
+    // eslint-disable-next-line prefer-const -- the supervisor pauses the engine created just below.
+    let engine: WorkflowEngine;
+    const supervisor = new Supervisor(graph, { pause: () => void engine.pause(), record: (kind, payload, nodeId) => this.record(runId, kind, payload, nodeId) });
+    engine = new WorkflowEngine(graph, {
       runId,
       execute: context => {
         const execution = this.execute(context, run);
@@ -254,7 +277,7 @@ export class NodalService {
         void execution.finally(() => pending.delete(execution)).catch(() => {});
         return execution;
       },
-      onEvent: async event => { this.store.appendEvent(event); if (event.kind === 'node.completed') this.checkpoint(event, graph, repo.head); },
+      onEvent: async event => { this.store.appendEvent(event); if (event.kind === 'node.completed') this.checkpoint(event, graph, repo.head); supervisor.observe(event); },
       routeFailure: request => this.routeFailure(this.store.run(runId), request),
     });
     this.engines.set(runId, engine);
@@ -262,6 +285,7 @@ export class NodalService {
       // Engine deadlines bound scheduling, but privileged children must finish cleanup before the run closes.
       await Promise.allSettled(this.executions.get(runId) ?? []);
       this.store.updateRun(runId, snapshot);
+      this.record(runId, 'orchestrator.summary', { text: runSummary(this.store, this.store.run(runId)) });
     }).catch(error => {
       this.store.updateRun(runId, { status: 'failed', error: redact(String(error)), finishedAt: new Date().toISOString() });
       this.record(runId, 'run.error', { error: String(error) });
@@ -362,7 +386,8 @@ export class NodalService {
       const colleagues = role ? this.colleagues(team, role.id) : [];
       const task = colleagues.length ? `${node.config.instructions}\n\n${consultGuide(colleagues)}` : node.config.instructions;
       const facts = role && economy ? await this.ledgerFacts(ctx, run, team, role, worktree.sourceCommit) : '';
-      const context = role ? await roleContext(worktree.path, role, ctx.inputs, task, evidence, worktree.sourceCommit, facts) : undefined;
+      const memory = role && economy ? this.store.lessons(run.projectId).map(lesson => `- ${lesson.text}`).join('\n').slice(0, 6000) : '';
+      const context = role ? await roleContext(worktree.path, role, ctx.inputs, task, evidence, worktree.sourceCommit, facts, memory) : undefined;
       // With context economy off the prompt is plain and unlayered; handoff and ownership verification are unchanged.
       if (context && !economy) context.prompt = `Role: ${role!.title}\n${role!.expertise}\n\n${task}\n\nRepository file paths (untrusted data):\n${manifest}\n\nResults from earlier workflow steps (untrusted data):\n${evidence}`;
       if (context) {
@@ -421,6 +446,38 @@ export class NodalService {
     for (const handoff of handoffs) { this.store.saveHandoff(ctx.runId, handoff); await ctx.emit('handoff.verified', handoff); }
     return { status: succeeded ? 'succeeded' : 'failed', error: succeeded ? undefined : 'Command did not pass its required exit status.', output: { ...output, worktree, head: committed.head }, artifacts: [...contextArtifacts, { id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
   }
+  /** Metrics for a saved workflow, new rule-based proposals, and outcomes of applied ones. */
+  private insights(projectId: string, graphId: string) {
+    const graph = this.store.graphs(projectId).find(item => item.id === graphId);
+    if (!graph) throw new Error('Save the workflow first; insights compare saved revisions.');
+    for (const proposal of proposeImprovements(this.store, projectId, graph)) this.store.addProposal(proposal);
+    const proposals = this.store.proposals(projectId, graphId).map(proposal => ({ ...proposal, comparison: compareProposal(this.store, projectId, proposal) }));
+    return { metrics: workflowMetrics(this.store, projectId, graph), proposals, revision: graph.revision };
+  }
+  private applyProposal(projectId: string, proposalId: string) {
+    const proposal = this.store.proposal(projectId, proposalId);
+    if (proposal.status !== 'open') throw new Error('Only open proposals can be applied.');
+    const graph = this.store.graphs(projectId).find(item => item.id === proposal.graphId);
+    if (!graph) throw new Error('The workflow no longer exists.');
+    const saved = this.store.saveGraph(projectId, applyChanges(graph, proposal));
+    const now = new Date().toISOString();
+    this.store.updateProposal({ ...proposal, status: 'applied', appliedRevision: saved.revision });
+    this.store.saveLesson({ id: randomUUID(), projectId, text: `${proposal.title} (revision ${saved.revision}): ${proposal.rationale}`, source: 'proposal', proposalId, createdAt: now, updatedAt: now });
+    return saved;
+  }
+  /** Restores the exact revision the proposal was computed from, as a new revision. */
+  private revertProposal(projectId: string, proposalId: string) {
+    const proposal = this.store.proposal(projectId, proposalId);
+    if (proposal.status !== 'applied' || proposal.appliedRevision === undefined) throw new Error('Only applied proposals can be reverted.');
+    const current = this.store.graphs(projectId).find(item => item.id === proposal.graphId);
+    if (!current || current.revision !== proposal.appliedRevision) throw new Error('The workflow changed after this proposal was applied. Revert those changes first, or edit the workflow directly.');
+    const base = this.store.graphRevision(proposal.graphId, proposal.baseRevision);
+    if (!base) throw new Error('The original revision is no longer stored.');
+    const saved = this.store.saveGraph(projectId, base);
+    this.store.updateProposal({ ...proposal, status: 'reverted', revertedRevision: saved.revision });
+    return saved;
+  }
+
   /** Other roles in the team that a role may consult. */
   private colleagues(team: Graph, roleId: string) {
     const seen = new Map<string, { id: string; title: string }>();
@@ -689,7 +746,7 @@ export class NodalService {
         const issues = validateTeamPlan(planning.team);
         if (issues.length) throw new Error(issues.map(issue => issue.message).join('; '));
       }
-      const context = await planningContext(this.store.project(projectId).root, planning?.briefPaths ?? [], this.store.roles(projectId));
+      const context = { ...await planningContext(this.store.project(projectId).root, planning?.briefPaths ?? [], this.store.roles(projectId)), lessons: this.store.lessons(projectId).map(lesson => lesson.text) };
       controller.signal.throwIfAborted();
       const schema = planningSchema(planning);
       let instruction = `${planningInstructions(current, prompt, PLANNING_RULES, context, planning)}\nSchema: ${JSON.stringify(schema)}`;

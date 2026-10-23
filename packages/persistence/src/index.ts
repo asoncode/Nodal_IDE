@@ -22,6 +22,13 @@ const now = () => new Date().toISOString();
 export interface Project { id: string; name: string; root: string; createdAt: string; branch?: string; isGitRepository?: boolean }
 export interface Consult { id: string; runId: string; attemptId: string; fromRoleId: string; toRoleId: string; question: string; answer: string; provider: string; createdAt: string }
 export interface LedgerSnapshot { id: string; runId: string; attemptId: string; repoSha: string; contentHash: string; text: string; createdAt: string }
+export interface ProposalChange { nodeId: string; field: string; from: unknown; to: unknown }
+export interface Proposal {
+  id: string; projectId: string; graphId: string; ruleKey: string; baseRevision: number; title: string; rationale: string;
+  evidence: { runIds: string[]; count: number; detail?: string[] }; changes: ProposalChange[]; widensScope: boolean;
+  status: 'open' | 'applied' | 'dismissed' | 'reverted'; createdAt: string; appliedRevision?: number; revertedRevision?: number;
+}
+export interface Lesson { id: string; projectId: string; text: string; source: 'user' | 'proposal'; proposalId?: string; createdAt: string; updatedAt: string }
 export type StoredRun = Partial<WorkflowRun> & { id: string; projectId: string; graph: Graph; status: string; createdAt: string; repositorySha?: string; parentRunId?: string };
 
 export class Store {
@@ -67,6 +74,9 @@ export class Store {
       INSERT OR IGNORE INTO migrations VALUES(4,datetime('now'));
       CREATE TABLE IF NOT EXISTS context_usage(attempt_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id), layer TEXT NOT NULL, characters INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(attempt_id, layer));
       INSERT OR IGNORE INTO migrations VALUES(5,datetime('now'));
+      CREATE TABLE IF NOT EXISTS improvement_proposals(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), graph_id TEXT NOT NULL, rule_key TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(project_id, rule_key));
+      CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), json TEXT NOT NULL);
+      INSERT OR IGNORE INTO migrations VALUES(6,datetime('now'));
     `));
   }
   transaction<T>(action: () => T): T {
@@ -134,6 +144,25 @@ export class Store {
   contextUsage(runId: string): { attemptId: string; layer: string; characters: number }[] {
     return (this.db.prepare('SELECT attempt_id AS attemptId, layer, characters FROM context_usage WHERE run_id=? ORDER BY rowid').all(runId) as { attemptId: string; layer: string; characters: number }[]);
   }
+  proposals(projectId: string, graphId?: string): Proposal[] {
+    this.project(projectId);
+    return graphId ? this.many('SELECT json FROM improvement_proposals WHERE project_id=? AND graph_id=? ORDER BY rowid DESC', projectId, graphId) : this.many('SELECT json FROM improvement_proposals WHERE project_id=? ORDER BY rowid DESC', projectId);
+  }
+  proposal(projectId: string, id: string): Proposal { const proposal = this.one<Proposal>('SELECT json FROM improvement_proposals WHERE id=? AND project_id=?', id, projectId); if (!proposal) throw new Error('Proposal not found'); return proposal; }
+  /** One proposal per rule key: the same finding is never re-proposed after it was applied or dismissed. */
+  addProposal(proposal: Proposal): boolean {
+    const result = this.db.prepare('INSERT OR IGNORE INTO improvement_proposals VALUES(?,?,?,?,?,?)').run(proposal.id, proposal.projectId, proposal.graphId, proposal.ruleKey, proposal.status, json(proposal));
+    return Number(result.changes) > 0;
+  }
+  updateProposal(proposal: Proposal): void { this.db.prepare('UPDATE improvement_proposals SET status=?, json=? WHERE id=?').run(proposal.status, json(proposal), proposal.id); }
+  lessons(projectId: string): Lesson[] { this.project(projectId); return this.many('SELECT json FROM lessons WHERE project_id=? ORDER BY rowid', projectId); }
+  saveLesson(lesson: Lesson): Lesson { this.project(lesson.projectId); this.db.prepare('INSERT INTO lessons VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(lesson.id, lesson.projectId, json(lesson)); return lesson; }
+  deleteLesson(projectId: string, id: string): void { this.project(projectId); this.db.prepare('DELETE FROM lessons WHERE project_id=? AND id=?').run(projectId, id); }
+  /** A stored revision of a graph, by graph ID and revision number. */
+  graphRevision(graphId: string, revision: number): Graph | undefined {
+    const rows = this.db.prepare('SELECT json FROM graph_revisions WHERE graph_id=? ORDER BY created_at DESC').all(graphId) as { json: string }[];
+    return rows.map(row => JSON.parse(row.json) as Graph).find(graph => graph.revision === revision);
+  }
   saveHandoff(runId: string, handoff: VerifiedHandoff): void { this.db.prepare('INSERT INTO handoffs VALUES(?,?,?,?) ON CONFLICT(run_id,attempt_id,name) DO UPDATE SET json=excluded.json').run(runId, handoff.attemptId, handoff.name, json(handoff)); }
   handoffs(runId: string): VerifiedHandoff[] { this.run(runId); return this.many('SELECT json FROM handoffs WHERE run_id=? ORDER BY rowid', runId); }
   saveGraph(projectId: string, graph: Graph): Graph {
@@ -166,6 +195,10 @@ export class Store {
   checkpoint(checkpoint: RunCheckpoint): void { this.db.prepare('INSERT INTO checkpoints VALUES(?,?,?,?)').run(checkpoint.id, checkpoint.runId, checkpoint.nodeId ?? null, json(checkpoint)); }
   artifacts(runId: string): Artifact[] { return this.many('SELECT json FROM artifacts WHERE run_id=? ORDER BY rowid', runId); }
   checkpoints(runId: string): RunCheckpoint[] { return this.many('SELECT json FROM checkpoints WHERE run_id=? ORDER BY rowid', runId); }
+  eventsByKind(runId: string, kinds: string[]): ExecutionEvent[] {
+    if (!kinds.length) return [];
+    return this.many(`SELECT json FROM events WHERE run_id=? AND kind IN (${kinds.map(() => '?').join(',')}) ORDER BY monotonic_sequence`, runId, ...kinds);
+  }
   events(runId: string, after = 0): ExecutionEvent[] { return this.many('SELECT json FROM events WHERE run_id=? AND monotonic_sequence>? ORDER BY monotonic_sequence LIMIT 1000', runId, after); }
   appendEvent(event: ExecutionEvent): ExecutionEvent {
     return this.transaction(() => {

@@ -380,3 +380,20 @@ input[type=checkbox], input[type=range] { accent-color: var(--gold); }
 .playbook-body { flex: 1; min-height: 0; display: flex; }
 .playbook-body > .canvas { flex: 1; min-width: 0; }
 .playbook-step { width: 280px; flex-shrink: 0; overflow: auto; padding: 12px 14px; border-left: 1px solid var(--border); background: var(--bg-side); display: flex; flex-direction: column; gap: 12px; }
+
+/* Orchestrator panel */
+.orchestrator-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.orchestrator-body { display: flex; flex-direction: column; gap: 10px; padding: 0 12px 16px; }
+.metrics-table { width: 100%; border-collapse: collapse; font: 11px var(--mono); }
+.metrics-table th { text-align: left; font-weight: 500; color: var(--fg-dim); padding: 4px 4px 4px 0; border-bottom: 1px solid var(--border); }
+.metrics-table td { padding: 4px 4px 4px 0; color: var(--fg-muted); border-bottom: 1px solid var(--border); max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.metrics-table td:first-child { color: var(--fg); }
+.proposal { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-elevated); font-size: 12px; }
+.proposal p { color: var(--fg-muted); line-height: 1.5; }
+.proposal ul { margin: 0; padding-left: 16px; color: var(--fg-muted); }
+.proposal code { font: 11px var(--mono); color: var(--fg); }
+.proposal small { color: var(--fg-dim); }
+.proposal.applied { border-color: var(--border); background: transparent; }
+.proposal-warning { color: var(--gold) !important; }
+.lesson { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; line-height: 1.5; color: var(--fg-muted); }
+.lesson span { flex: 1; }

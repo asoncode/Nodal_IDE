@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ReactFlow, Background, BackgroundVariant, Controls, MiniMap, applyNodeChanges, applyEdgeChanges, type Node as FlowNode, type Edge as FlowEdge, type Connection, type ReactFlowInstance } from '@xyflow/react';
 import { DiffEditor } from '@monaco-editor/react';
-import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, Bot, CircleX, CircleCheck, Users } from 'lucide-react';
+import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, Bot, CircleX, CircleCheck, Users, Gauge } from 'lucide-react';
 import { api } from './api.js';
 import ChatPanel from './ChatPanel.js';
 import GenerationPanel from './GenerationPanel.js';
@@ -9,6 +9,7 @@ import RoleEditor, { RoleLibrary, RoleRunDetails } from './RoleEditor.js';
 import { nodeIcons, nodeTypes } from './WorkflowNode.js';
 import ToolEditor from './ToolEditor.js';
 import PlaybookEditor from './PlaybookEditor.js';
+import OrchestratorPanel from './OrchestratorPanel.js';
 import ExplorerPanel from './ExplorerPanel.js';
 import SearchPanel from './SearchPanel.js';
 import QuickPick from './QuickPick.js';
@@ -21,7 +22,7 @@ import { GraphSchema, roleOwnsPath } from '../../../packages/shared/src/index.js
 import { validateGraph } from '../../../packages/core/src/index.js';
 
 type Tab = 'graph' | 'code' | 'diff' | 'replay' | 'playbook';
-type View = 'explorer' | 'search' | 'workflows' | 'team' | 'runs' | 'providers';
+type View = 'explorer' | 'search' | 'workflows' | 'team' | 'runs' | 'orchestrator' | 'providers';
 type Diff = { diff: string; branch: string; worktrees: { nodeId: string; path: string; branch: string; diff: string; head: string; sourceHead: string; dirty: boolean }[] };
 const kinds = Object.keys(NODE_LABELS) as NodeKind[];
 const stringify = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
@@ -112,6 +113,8 @@ export default function App() {
   const edge = graph.edges.find(item => item.id === selectedEdge);
   const currentBuffer = buffers.find(buffer => buffer.path === activeFile);
   const dirty = JSON.stringify(graph) !== savedGraph;
+  const escalation = events.findLast(event => event.kind === 'orchestrator.escalation');
+  useEffect(() => { if (escalation) setMessage(`Orchestrator paused the run: ${(escalation.payload as { message?: string }).message ?? ''} Resume when ready.`); }, [escalation?.eventId]);
   const selectedRun = inspection?.run ?? runs.find(run => run.id === runId);
   const running = !!selectedRun && activeStates.includes(selectedRun.status);
   const approvals = inspection?.approvals.filter(item => !item.decision || item.decision === 'pending') ?? [];
@@ -423,7 +426,7 @@ export default function App() {
 
     <div className="workbench">
       <nav className="activity-bar" aria-label="Views">
-        {([{ id: 'explorer', label: 'Explorer', icon: Files }, { id: 'workflows', label: 'Workflows', icon: Workflow }, { id: 'team', label: 'Team', icon: Bot }, { id: 'runs', label: 'Runs', icon: History }, { id: 'providers', label: 'Providers', icon: Plug }] as const).map(item => <button key={item.id} className={layout.sidebar && view === item.id ? 'active' : ''} title={item.label} aria-label={item.label} onClick={() => showView(item.id)}><item.icon size={22} strokeWidth={1.5}/></button>)}
+        {([{ id: 'explorer', label: 'Explorer', icon: Files }, { id: 'workflows', label: 'Workflows', icon: Workflow }, { id: 'team', label: 'Team', icon: Bot }, { id: 'runs', label: 'Runs', icon: History }, { id: 'orchestrator', label: 'Workflow orchestrator', icon: Gauge }, { id: 'providers', label: 'Providers', icon: Plug }] as const).map(item => <button key={item.id} className={layout.sidebar && view === item.id ? 'active' : ''} title={item.label} aria-label={item.label} onClick={() => showView(item.id)}><item.icon size={22} strokeWidth={1.5}/></button>)}
         <button className={tab === 'diff' ? 'active' : ''} title="Source control" aria-label="Source control" onClick={refreshDiff}><GitCompare size={22} strokeWidth={1.5}/></button>
         <button className={chatOpen ? 'active' : ''} title="Agent chat" aria-label="Agent chat" onClick={() => setChatOpen(old => !old)}><MessageSquare size={22} strokeWidth={1.5}/></button>
       </nav>
@@ -465,6 +468,7 @@ export default function App() {
               {project && <RoleLibrary key={project.id} projectId={project.id}/>}
             </div>
           </>}
+          {view === 'orchestrator' && (project ? <OrchestratorPanel key={`${project.id}:${graph.id}`} projectId={project.id} graph={graph} saved={graphs.some(item => item.id === graph.id)} onGraphSaved={saved => { graphBaseline.current = JSON.stringify(saved); setGraph(saved); setSavedGraph(JSON.stringify(saved)); setUndo([]); setRedo([]); void api<Graph[]>('listGraphs', { projectId: project.id }).then(setGraphs); setMessage(`Saved revision ${saved.revision} from the orchestrator`); }}/> : <p className="sidebar-hint">Open a folder to use the orchestrator.</p>)}
           {view === 'runs' && <>
             <div className="view-title"><span>Runs</span><small>{runs.length}</small></div>
             <div className="sidebar-scroll">
