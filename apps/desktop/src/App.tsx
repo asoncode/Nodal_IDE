@@ -4,6 +4,7 @@ import { DiffEditor } from '@monaco-editor/react';
 import { Play, Pause, Square, Save, Check, Plus, Workflow, GitCompare, History, FolderOpen, ChevronRight, ChevronDown, FileCode2, GitBranch, Sparkles, Undo2, Redo2, Copy, Trash2, X, Search, ShieldCheck, Download, Upload, Files, Plug, RefreshCw, PanelLeft, PanelBottom, PanelRight, CirclePlay, Bot, SquareTerminal, GitFork, Split, Merge, Repeat, UserCheck, GitMerge, Flag, CircleX, CircleCheck, type LucideIcon } from 'lucide-react';
 import { api } from './api.js';
 import ChatPanel from './ChatPanel.js';
+import GenerationPanel from './GenerationPanel.js';
 import ExplorerPanel from './ExplorerPanel.js';
 import SearchPanel from './SearchPanel.js';
 import QuickPick from './QuickPick.js';
@@ -99,8 +100,6 @@ export default function App() {
   const [modal, setModal] = useState<'project' | 'generate' | 'palette' | null>(null);
   const [projectPath, setProjectPath] = useState('');
   const [prompt, setPrompt] = useState('');
-  const [planningProvider, setPlanningProvider] = useState('claude');
-  const [generated, setGenerated] = useState<{ graph: Graph; summary: string }>();
   const [paletteQuery, setPaletteQuery] = useState('');
   const [paletteMode, setPaletteMode] = useState<'nodes' | 'files' | 'commands'>('nodes');
   const [configText, setConfigText] = useState('');
@@ -404,7 +403,7 @@ export default function App() {
       <div className="command-actions">
         <IconButton title="Validate" onClick={() => { setMessage(validation.valid ? 'Graph is valid. All paths and execution bounds checked.' : ''); setError(validation.valid ? '' : validation.errors.map(issue => issue.message).join(' · ')); }}><ShieldCheck size={15}/></IconButton>
         <IconButton title="Save" disabled={busy || fileOperationPending} onClick={() => void act(save)}><Save size={15}/></IconButton>
-        <IconButton title="Generate" onClick={() => { setGenerated(undefined); setModal('generate'); }}><Sparkles size={15}/></IconButton>
+        <IconButton title="Generate" onClick={() => { setError(''); setModal('generate'); }}><Sparkles size={15}/></IconButton>
         <span className="divider"/>
         <IconButton title={inspection?.run.status === 'paused' ? 'Resume run' : 'Pause run'} disabled={!running || busy} onClick={() => void act(async () => { await api(inspection?.run.status === 'paused' ? 'resume' : 'pause', { runId }); })}><Pause size={15}/></IconButton>
         <IconButton title="Stop run" disabled={!running || busy} onClick={() => void act(async () => { await api('cancel', { runId }); })}><Square size={13}/></IconButton>
@@ -614,15 +613,9 @@ export default function App() {
         <div className="dialog-actions">{isDesktop() && <button className="secondary" onClick={openFolder}>Browse…</button>}<button className="primary" disabled={!projectPath || busy} onClick={openProjectPath}>Open</button></div>
         {projects.length > 0 && <div className="recent-projects"><div className="inspector-group">Recent</div>{projects.map(item => <button key={item.id} onClick={() => void act(async () => { if (await loadProject(item)) { explicitFolderChoice.current = true; setModal(null); setView('explorer'); setTab('code'); } })}><FolderOpen size={14}/><strong>{item.name}</strong><small>{item.root}</small></button>)}</div>}
       </div>}
-      {modal === 'generate' && <div className="modal-body">
-        <p>Describe the work. You review a validated graph before it is applied to the canvas.</p>
-        <Field label="Planning provider"><select value={planningProvider} onChange={event => setPlanningProvider(event.target.value)}><option value="claude">Claude</option><option value="codex" disabled>Codex — tool-free planning unavailable</option></select></Field>
-        <Field label="What should this workflow do?"><textarea autoFocus rows={5} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="Plan a fix, implement it with Codex, run regression tests, and ask for approval before merging…"/></Field>
-        <p className="field-help">Generating sends your prompt and current workflow configuration to the selected provider. It does not execute the generated workflow.</p>
-        {generated && <div className="generated-preview"><strong>{generated.graph.name}</strong><p>{generated.summary}</p><small>{generated.graph.nodes.length} nodes · up to {generated.graph.settings.maxConcurrency} concurrent · {generated.graph.settings.maxTotalAttempts} attempts maximum</small><div>{generated.graph.nodes.map(node => <span key={node.id} className="chip">{node.label}{node.kind === 'agent' ? ` · ${node.config.provider}` : ''}</span>)}</div><details><summary>Review generated graph JSON</summary><pre>{JSON.stringify(generated.graph, null, 2)}</pre></details></div>}
-        <div className="dialog-actions"><button className="secondary" disabled={busy || !project || !prompt.trim()} onClick={() => void act(async () => { if (!project) return; const result = await api<{ graph: Graph; summary: string }>('generateGraph', { projectId: project.id, graph, prompt, provider: planningProvider }); const parsed = GraphSchema.parse(result.graph); const check = validateGraph(parsed); if (!check.valid) throw new Error(check.errors.map(issue => issue.message).join(' · ')); setGenerated({ ...result, graph: parsed }); })}>{busy ? 'Generating…' : generated ? 'Generate again' : 'Generate preview'}</button><button className="primary" disabled={!generated || busy} onClick={() => { if (generated) { edit(generated.graph); setSelectedId(undefined); setTab('graph'); setModal(null); setMessage('Applied generated workflow as a draft. Review permissions before running.'); } }}>Apply to canvas</button></div>
-        {!project && <p className="inline-error">Open a repository before generating a graph.</p>}
-      </div>}
+      {modal === 'generate' && (project ? <GenerationPanel key={project.id} projectId={project.id} graph={graph} prompt={prompt} onPromptChange={setPrompt} onApply={next => {
+        edit(next); setSelectedId(undefined); setTab('graph'); setModal(null); setMessage('Applied generated workflow as a draft. Review permissions before running.');
+      }}/> : <div className="modal-body"><p className="inline-error">Open a repository before generating a graph.</p></div>)}
       {modal === 'palette' && <QuickPick key={paletteMode} label={paletteMode === 'files' ? 'Quick Open' : paletteMode === 'commands' ? 'Command Palette' : 'Search nodes and files'} placeholder={paletteMode === 'files' ? 'Search files by name or path' : paletteMode === 'commands' ? 'Type a command' : 'Add a workflow node'} query={paletteQuery} onQueryChange={setPaletteQuery} items={paletteItems} onClose={() => setModal(null)} onChoose={id => {
         setModal(null);
         if (paletteMode === 'files') openFile(id);

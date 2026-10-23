@@ -46,7 +46,11 @@ beforeEach(() => {
       searchWorkspace: { matches: [{ path: 'src/example.ts', line: 8, column: 3, preview: 'export const answer = 1;' }], truncated: false },
       createFile: { path: params.path, content: '', hash: 'c'.repeat(64) },
       readFile: { content: 'export const answer = 1;', hash: 'a'.repeat(64) }, writeFile: { content: params.content, hash: 'b'.repeat(64) },
-      saveGraph: params.graph, generateGraph: { graph: generation, summary: 'A validated plan.' },
+      saveGraph: params.graph,
+      providerStatus: [{ id: 'claude', available: true, authenticated: true, status: 'authenticated', message: 'Signed in' }, { id: 'codex', available: true, authenticated: true, status: 'authenticated', message: 'Signed in' }],
+      startGeneration: { id: 'generation-1', projectId: project.id, provider: 'claude', status: 'running', createdAt: new Date().toISOString() },
+      inspectGeneration: { id: 'generation-1', projectId: project.id, provider: 'claude', status: 'succeeded', result: { graph: generation, summary: 'A validated plan.', attempts: 1 }, createdAt: new Date().toISOString() },
+      cancelGeneration: { id: 'generation-1', projectId: project.id, provider: 'claude', status: 'cancelled', createdAt: new Date().toISOString() },
       run: { id: 'run-1', projectId: project.id, graph, status: 'running', createdAt: new Date().toISOString() },
       inspectRun: { run: { id: 'run-1', projectId: project.id, graph, status: 'running', createdAt: new Date().toISOString() }, attempts: [], checkpoints: [], approvals: [{ id: 'approval-1', nodeId: 'command-1', decision: 'pending', message: 'Run node --version with your user privileges?', scope: { command: 'node', args: ['--version'] } }] },
       events: [{ eventId: 'event-1', sequence: 1, runId: 'run-1', nodeId: 'command-1', timestamp: new Date().toISOString(), kind: 'command.output', payload: { text: 'v24.0.0' } }],
@@ -215,6 +219,7 @@ describe('workspace flows', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
     const dialog = screen.getByRole('dialog', { name: 'Generate workflow' });
     fireEvent.change(within(dialog).getByLabelText('What should this workflow do?'), { target: { value: 'Check Node version with approval' } });
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Generate preview' })).toHaveProperty('disabled', false));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Generate preview' }));
     await within(dialog).findByText('Generated plan');
     expect(calls.some(call => call.method === 'run')).toBe(false);

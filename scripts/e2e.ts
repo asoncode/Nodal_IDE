@@ -4,6 +4,10 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import type { ChatSession } from '../packages/shared/src/chat.js';
+import type { GenerationSnapshot } from '../packages/shared/src/generation.js';
+import { GraphSchema } from '../packages/shared/src/index.js';
+import { validateGraph } from '../packages/core/src/index.js';
+import { createCommandGraph } from '../packages/core/src/templates.js';
 import { preview } from 'vite';
 import { Store } from '../packages/persistence/src/index.js';
 import { NodalService } from '../packages/runtime/src/service.js';
@@ -37,6 +41,42 @@ for(const args of [['init','-b','main'],['add','--','.'],['-c','user.name=Nodal 
 }
 const store=new Store(join(data,'nodal.sqlite'));
 const service=new NodalService(store,data);
+// Test-only generation fixture: real HTTP and renderer, simulated CLI accounts/model output.
+// Never invoke a paid SDK from this flow, including if the UI regresses to the legacy method.
+const dispatch=service.dispatch.bind(service);
+const fixtureGraph=GraphSchema.parse({ ...createCommandGraph(), name:'Simulated generation fixture' });
+assert(validateGraph(fixtureGraph).valid,'Simulated generation fixture must be a valid graph');
+const generationFixtures=new Map<string,{ snapshot:GenerationSnapshot; startedAt:number }>();
+const fixtureLoginCommand='"/simulated/nodal/bundled/claude" auth login';
+let fixtureAuthMissing=false, fixtureStarts=0;
+service.dispatch=async(method,raw)=>{
+  if(method==='providerStatus') return [
+    { id:'claude', available:true, authenticated:!fixtureAuthMissing, status:fixtureAuthMissing?'missing':'authenticated', message:'Simulated CLI account fixture; no model request.', loginCommand:fixtureLoginCommand },
+    { id:'codex', available:true, authenticated:true, status:'authenticated', message:'Simulated CLI account fixture; no model request.' },
+  ];
+  if(method==='generateGraph') throw new Error('The E2E generation fixture requires short start/inspect requests; paid model calls are disabled.');
+  if(method==='startGeneration') {
+    const input=raw as { projectId:string; provider:string; prompt:string };
+    assert.equal(input.provider,'claude'); assert(input.prompt.trim()); assert(!fixtureAuthMissing);
+    const snapshot:GenerationSnapshot={id:`simulated-generation-${++fixtureStarts}`,projectId:input.projectId,provider:'claude',status:'running',createdAt:new Date().toISOString()};
+    generationFixtures.set(snapshot.id,{snapshot,startedAt:Date.now()});
+    return structuredClone(snapshot);
+  }
+  if(method==='inspectGeneration'||method==='cancelGeneration') {
+    const input=raw as { projectId:string; generationId:string };
+    const fixture=generationFixtures.get(input.generationId); assert(fixture,'Unknown simulated generation');
+    assert.equal(input.projectId,fixture.snapshot.projectId);
+    if(method==='cancelGeneration'&&fixture.snapshot.status==='running') {
+      fixture.snapshot.status='cancelled'; fixture.snapshot.finishedAt=new Date().toISOString();
+    }
+    if(method==='inspectGeneration'&&fixture.snapshot.status==='running'&&Date.now()-fixture.startedAt>=1200) {
+      fixture.snapshot.status='succeeded'; fixture.snapshot.finishedAt=new Date().toISOString();
+      fixture.snapshot.result={graph:fixtureGraph,summary:'Simulated generation fixture: review before applying.',attempts:1};
+    }
+    return structuredClone(fixture.snapshot);
+  }
+  return dispatch(method,raw);
+};
 const runtime=await startServer(service,{origins:['http://127.0.0.1:5174']});
 const vite=await preview({configFile:'apps/desktop/vite.config.ts',preview:{host:'127.0.0.1',port:5174,strictPort:true}});
 try {
@@ -79,6 +119,53 @@ try {
   assert.equal(store.graphs(project.id)[0].nodes.length,4); assert.equal(store.graphs(project.id)[0].edges.length,3);
   assert((store.graphs(project.id)[0].nodes.find(node=>node.id===approvalId)?.position.x ?? 0)>100);
   console.log('PASS node add, keyboard move, port connections, configuration, and save');
+
+  const graphsBeforeGeneration=structuredClone(store.graphs(project.id));
+  const runsBeforeGeneration=store.runs(project.id).length;
+  const generationPrompt='Simulated fixture: plan a command workflow without running it.';
+  await browse('click','button[aria-label="Generate"]');
+  await browse('wait','[role="dialog"][aria-label="Generate workflow"]');
+  await eventually(async()=> (await browse('js',`Array.from(document.querySelectorAll('[aria-label="CLI accounts"] small')).filter(node=>node.textContent==="Connected").length`)).trim()==='2','Simulated Claude and Codex CLI accounts did not appear');
+  await browse('fill','label.field:has-text("What should this workflow do?") textarea',generationPrompt);
+  await browse('click','[aria-label="Generate workflow"] button:has-text("Generate preview")');
+  await browse('wait','[aria-label="Generate workflow"] [role="status"]');
+  assert((await browse('text')).includes('Generating workflow'),'Delayed simulated generation did not show progress');
+  assert.equal(fixtureStarts,1,'Generation started more than once');
+  assert.equal((await browse('js','document.querySelector(".generated-preview") !== null')).trim(),'false','Generation preview appeared before the delayed fixture completed');
+  await browse('wait','.generated-preview:has-text("Simulated generation fixture")');
+  assert.equal(generationFixtures.get('simulated-generation-1')?.snapshot.status,'succeeded');
+  assert.deepEqual(store.graphs(project.id),graphsBeforeGeneration,'Preview persisted a graph before explicit application');
+  assert.equal(store.runs(project.id).length,runsBeforeGeneration,'Preview executed a workflow');
+  assert.equal((await browse('js',`document.querySelector('[aria-label="Generate workflow"] .dialog-actions .primary').disabled`)).trim(),'false','Validated fixture preview cannot be applied explicitly');
+  await mkdir('docs/screenshots',{recursive:true});
+  await browse('screenshot',resolve('docs/screenshots/generation.png'));
+  await browse('click','[aria-label="Generate workflow"] button[aria-label="Close dialog"]');
+  assert.equal((await browse('js','document.querySelectorAll(".react-flow__node").length')).trim(),'4','Closing the preview replaced the canvas');
+
+  await browse('click','button[aria-label="Generate"]');
+  await browse('wait','[aria-label="Generate workflow"] textarea');
+  assert.equal((await browse('js',`document.querySelector('[aria-label="Generate workflow"] textarea').value`)).trim(),generationPrompt,'Closing the preview lost the prompt');
+  fixtureAuthMissing=true;
+  await browse('click','[aria-label="Generate workflow"] button:has-text("Refresh")');
+  await browse('wait','[aria-label="CLI accounts"] code');
+  assert((await browse('text')).includes(fixtureLoginCommand),'Missing CLI sign-in did not display the simulated bundled login command');
+  assert.equal((await browse('js',`Array.from(document.querySelectorAll('[aria-label="Generate workflow"] button')).find(button=>button.textContent==="Generate preview").disabled`)).trim(),'true','Missing Claude sign-in did not disable generation');
+  fixtureAuthMissing=false;
+  await browse('click','[aria-label="Generate workflow"] button:has-text("Refresh")');
+  await eventually(async()=> (await browse('js',`Array.from(document.querySelectorAll('[aria-label="Generate workflow"] button')).find(button=>button.textContent==="Generate preview").disabled`)).trim()==='false','Generation stayed disabled after simulated sign-in refresh');
+  await browse('click','[aria-label="Generate workflow"] button:has-text("Generate preview")');
+  await eventually(async()=>fixtureStarts===2,'Second simulated generation did not start');
+  await browse('click','[aria-label="Generate workflow"] button:has-text("Cancel generation")');
+  await eventually(async()=>generationFixtures.get('simulated-generation-2')?.snapshot.status==='cancelled','Cancel did not stop the same remote fixture');
+  await eventually(async()=> (await browse('text')).includes('Generation cancelled.'),'Cancellation was not visible');
+  await new Promise(resolveDelay=>setTimeout(resolveDelay,1400));
+  assert.equal(generationFixtures.get('simulated-generation-2')?.snapshot.status,'cancelled','Cancelled fixture changed status after its completion delay');
+  assert.equal((await browse('js','document.querySelector(".generated-preview") !== null')).trim(),'false','A cancelled generation displayed a late preview');
+  assert.equal((await browse('js',`document.querySelector('[aria-label="Generate workflow"] textarea').value`)).trim(),generationPrompt,'Cancellation lost the generation prompt');
+  assert.deepEqual(store.graphs(project.id),graphsBeforeGeneration,'Generation cancellation changed the saved graph');
+  assert.equal(store.runs(project.id).length,runsBeforeGeneration,'Generation cancellation started a workflow');
+  await browse('click','[aria-label="Generate workflow"] button[aria-label="Close dialog"]');
+  console.log('PASS simulated generation fixture: CLI accounts/login refresh, delayed HTTP polling, explicit-apply boundary, cancellation, preserved prompt (no model request)');
 
   await browse('click','.run-button');
   await eventually(async()=>store.runs(project.id).length===1,'Run did not start');

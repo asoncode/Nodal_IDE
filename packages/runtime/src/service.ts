@@ -11,6 +11,7 @@ import * as workspace from '../../workspace/src/index.js';
 import { checkAvailability, runProvider } from '../../providers/src/index.js';
 import { ChatRuntime } from './chat.js';
 import { TerminalRuntime } from './terminals.js';
+import type { GenerationResult, GenerationSnapshot } from '../../shared/src/generation.js';
 import type { CreateTerminalInput, TerminalOwner, TerminalScope } from '../../shared/src/terminal.js';
 import { CHAT_ATTACHMENT_LIMITS, isChatTextFilename, type ChatAttachmentInput, type CreateChatInput } from '../../shared/src/chat.js';
 
@@ -52,6 +53,9 @@ const requestSchemas = {
   approve: runParams.extend({ nodeId: id, approved: z.boolean() }),
   diff: projectParams.extend({ runId: id.optional() }),
   generateGraph: projectParams.extend({ graph: GraphSchema, prompt: z.string().min(1).max(20000), provider: z.enum(['codex','claude']) }),
+  startGeneration: projectParams.extend({ graph: GraphSchema, prompt: z.string().trim().min(1).max(20000), provider: z.enum(['codex','claude']) }),
+  inspectGeneration: projectParams.extend({ generationId: id }),
+  cancelGeneration: projectParams.extend({ generationId: id }),
   applyChanges: runParams.extend({ nodeId: id, expectedHead: id, expectedSourceHead: id, approved: z.literal(true) }),
   createChat: projectParams.extend({ provider: z.enum(['claude', 'codex']), model: z.string().trim().min(1).max(200).optional(), permission: z.enum(['read-only', 'scoped-edit']).default('read-only'), context: z.object({ graph: GraphSchema, nodeId: id, runId: id.optional() }).strict().optional() }),
   chats: projectParams, inspectChat: chatParams,
@@ -71,6 +75,8 @@ export class NodalService {
   private executions = new Map<string, Set<Promise<NodeResult>>>();
   private pending = new Map<string, PendingApproval>();
   private generation = new Set<AbortController>();
+  private generationJobs = new Map<string, { snapshot: GenerationSnapshot; controller: AbortController }>();
+  private closed = false;
   private chat: ChatRuntime;
   private terminals: TerminalRuntime;
   constructor(readonly store: Store, readonly dataDir: string) { store.recover(); this.chat = new ChatRuntime(store, dataDir); this.terminals = new TerminalRuntime(projectId => store.project(projectId).root); }
@@ -157,6 +163,9 @@ export class NodalService {
         return merged;
       }
       case 'generateGraph': return this.generateGraph(projectId, params.graph as Graph, params.prompt as string, params.provider as 'codex' | 'claude');
+      case 'startGeneration': return this.startGeneration(projectId, params.graph as Graph, params.prompt as string, params.provider as 'codex' | 'claude');
+      case 'inspectGeneration': return structuredClone(this.generationJob(projectId, params.generationId as string).snapshot);
+      case 'cancelGeneration': return this.cancelGeneration(projectId, params.generationId as string);
       default: throw new Error('Unsupported method');
     }
   }
@@ -296,24 +305,73 @@ export class NodalService {
     }
     return { diff: await workspace.getDiff(project.root), branch: repo.branch, worktrees };
   }
-  private async generateGraph(projectId: string, current: Graph, prompt: string, provider: 'codex' | 'claude') {
+  private pruneGenerationJobs() {
+    const finished = [...this.generationJobs.values()].filter(job => job.snapshot.status !== 'running');
+    for (const job of finished.slice(0, Math.max(0, finished.length - 32))) this.generationJobs.delete(job.snapshot.id);
+  }
+  private generationJob(projectId: string, generationId: string) {
     this.store.project(projectId);
-    const controller = new AbortController(); this.generation.add(controller);
-    const cwd = join(this.dataDir, 'planner'); await mkdir(cwd, { recursive: true, mode: 0o700 });
-    const schema = z.toJSONSchema(GraphSchema, { unrepresentable: 'any', target: 'draft-7' });
-    let instruction = `Return ONLY JSON matching this schema: ${JSON.stringify(schema)}. Build a Nodal workflow, never execute commands or modify files. Preserve unrelated nodes and positions. Exactly one start, reachable end, ordinary DAG, bounded quality_gate fail loop edges only. Use explicit command approvals and read-only provider permissions by default. Current graph: ${JSON.stringify(current)}\nUser request: ${prompt}`;
+    const job = this.generationJobs.get(generationId);
+    if (!job || job.snapshot.projectId !== projectId) throw new Error('Generation not found for this project.');
+    return job;
+  }
+  private startGeneration(projectId: string, graph: Graph, prompt: string, provider: 'codex' | 'claude'): GenerationSnapshot {
+    this.store.project(projectId);
+    if (this.closed) throw new Error('Runtime is closing.');
+    if ([...this.generationJobs.values()].some(job => job.snapshot.projectId === projectId && job.snapshot.status === 'running')) throw new Error('This project already has a generation in progress. Wait for it to finish or cancel it before trying again.');
+    if (this.generation.size >= 4) throw new Error('Too many active generations. Wait for a preview to finish.');
+    const controller = new AbortController();
+    const snapshot: GenerationSnapshot = { id: randomUUID(), projectId, provider, status: 'running', createdAt: new Date().toISOString() };
+    this.generationJobs.set(snapshot.id, { snapshot, controller });
+    void this.generateGraph(projectId, graph, prompt, provider, controller).then(result => {
+      if (controller.signal.aborted || snapshot.status !== 'running') return;
+      snapshot.status = 'succeeded'; snapshot.result = result; snapshot.finishedAt = new Date().toISOString();
+    }).catch(error => {
+      if (controller.signal.aborted || snapshot.status !== 'running') return;
+      snapshot.status = 'failed'; snapshot.error = redact(error instanceof Error ? error.message : String(error)).slice(0, 4000); snapshot.finishedAt = new Date().toISOString();
+    }).finally(() => this.pruneGenerationJobs());
+    return structuredClone(snapshot);
+  }
+  private cancelGeneration(projectId: string, generationId: string): GenerationSnapshot {
+    const { snapshot, controller } = this.generationJob(projectId, generationId);
+    if (snapshot.status === 'running') {
+      snapshot.status = 'cancelled'; snapshot.finishedAt = new Date().toISOString();
+      controller.abort(new Error('Graph generation cancelled.'));
+      this.pruneGenerationJobs();
+    }
+    return structuredClone(snapshot);
+  }
+  private async generateGraph(projectId: string, current: Graph, prompt: string, provider: 'codex' | 'claude', controller = new AbortController()): Promise<GenerationResult> {
+    this.store.project(projectId);
+    if (this.closed) throw new Error('Runtime is closing.');
+    this.generation.add(controller);
     try {
+      const status = await checkAvailability(provider);
+      controller.signal.throwIfAborted();
+      if (!status.available) throw new Error(`${provider === 'claude' ? 'Claude' : 'Codex'} is unavailable. ${status.message} No model request was made.`);
+      if (status.authentication === 'missing') throw new Error(`Sign in with ${status.loginCommand ?? (provider === 'claude' ? 'claude auth login' : 'codex login')}, then try again. ${status.message} No model request was made.`);
+      const cwd = join(this.dataDir, 'planner'); await mkdir(cwd, { recursive: true, mode: 0o700 });
+      const schema = z.toJSONSchema(GraphSchema, { unrepresentable: 'any', target: 'draft-7' });
+      let instruction = `Return ONLY JSON matching this schema: ${JSON.stringify(schema)}. Build a Nodal workflow, never execute commands or modify files. Preserve unrelated nodes and positions. Exactly one start, reachable end, ordinary DAG, bounded quality_gate fail loop edges only. Use explicit command approvals and read-only provider permissions by default. Current graph: ${JSON.stringify(current)}\nUser request: ${prompt}`;
       for (let attempt = 1; attempt <= 2; attempt++) {
+        controller.signal.throwIfAborted();
         const response = await runProvider({ provider, prompt: instruction, cwd, permissionMode: 'read-only', signal: controller.signal, timeoutMs: 120000, noTools: true, outputSchema: schema, maxTurns: 6 });
+        controller.signal.throwIfAborted();
         try {
           const text = response.output.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
           const parsed: unknown = JSON.parse(text); const check = validateGraph(parsed);
           if (!check.valid) throw new Error(check.errors.map(e => e.message).join('; '));
-          return { graph: check.graph, summary: `${check.graph!.nodes.length} nodes, concurrency ${check.graph!.settings.maxConcurrency}, up to ${check.graph!.settings.maxTotalAttempts} attempts. Review every command and permission before applying.`, attempts: attempt };
+          return { graph: check.graph!, summary: `${check.graph!.nodes.length} nodes, concurrency ${check.graph!.settings.maxConcurrency}, up to ${check.graph!.settings.maxTotalAttempts} attempts. Review every command and permission before applying.`, attempts: attempt };
         } catch (error) { instruction = `Correct this invalid graph response; return JSON only. Error: ${String(error)}\n${instruction}\nInvalid response: ${response.output.slice(0,30000)}`; }
       }
       throw new Error('Provider returned an invalid graph after two attempts. Your draft was not changed.');
     } finally { this.generation.delete(controller); }
   }
-  async close() { for (const c of this.generation) c.abort(); for (const e of this.engines.values()) e.cancel(); await Promise.allSettled([...this.tasks.values(), this.chat.close(), this.terminals.close()]); }
+  async close() {
+    this.closed = true;
+    for (const { snapshot } of this.generationJobs.values()) if (snapshot.status === 'running') this.cancelGeneration(snapshot.projectId, snapshot.id);
+    for (const c of this.generation) c.abort();
+    for (const e of this.engines.values()) e.cancel();
+    await Promise.allSettled([...this.tasks.values(), this.chat.close(), this.terminals.close()]);
+  }
 }

@@ -46,10 +46,10 @@ describe.skipIf(process.platform === 'win32')('real host PTY terminals', () => {
   it('resizes the PTY and interrupts a foreground program with Ctrl-C', async () => {
     const session = await create();
     runtime.resize({ ...scope(session), cols: 103, rows: 37 });
-    write(session, "stty size; sleep 30\r");
-    await waitFor(() => output(session).data.includes('37 103'));
+    write(session, `stty size; node -e "console.log(['FOREGROUND','READY'].join('_')); setInterval(()=>{},1000)"\r`);
+    await waitFor(() => output(session).data.includes('37 103') && output(session).data.includes('FOREGROUND_READY'));
     write(session, '\x03');
-    write(session, "printf 'AFTER_INTERRUPT\\n'\r");
+    write(session, "printf 'AFTER_%s\\n' INTERRUPT\r");
     await waitFor(() => output(session).data.includes('AFTER_INTERRUPT'));
     expect(output(session).status).toBe('running');
   });

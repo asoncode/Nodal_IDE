@@ -2,7 +2,7 @@
 
 ## Automated checks
 
-`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 207 unit/integration/UI cases.
+`pnpm lint`, `pnpm typecheck`, and `pnpm test` validate source only; generated bundles, native targets, and staged SDK dependency tests are excluded. The suite currently contains 239 unit/integration/UI cases.
 
 Coverage includes deterministic predicate evaluation, graph validation and templates, topological readiness, skipped branches, parallel concurrency, all join policies, retry readiness races, bounded loops with feedback evidence, iteration limits, cancellation during delayed retries, pause/resume boundaries, node/run timeout, approvals, journal failures, and interruption recovery.
 
@@ -61,3 +61,9 @@ Explorer tests use real temporary files for no-clobber rename and duplicate, sta
 UI checks cover dirty-buffer rename, confirmation and recovery for deletion, pending-operation editor protection, late responses after project switches, versioned Explorer commands, keyboard/IME-safe quick pickers, saved preferences, supported Monaco actions, diagnostics, and cursor navigation. A model-aware Monaco mock reproduces the wrapper's same-content path-switch behavior and verifies discarded text cannot return after closing/reopening an editor. Save All has a delayed-first-write/folder-switch regression that prevents old buffers being written to a new project.
 
 Browser E2E exercises actual rename, duplicate, delete, restore, folder creation, content search, file/command navigation, preferences, Find, JSON formatting and saving, and reopening a discarded editor with the same saved text as another tab. The existing workflow, approval, chat attachment, and real PTY checks remain in the same flow.
+
+## Workflow preview transport
+
+Generation starts with a short `startGeneration` request, then the renderer polls the project-scoped `inspectGeneration` endpoint. Tests cover delayed completion, provider preflight, explicit application, missing login guidance, bounded retention/concurrency, cancellation and late replies, dialog unmount, and readable API transport errors. Provider tests verify copyable login commands quote paths safely. These checks use mocked model responses and do not consume provider usage.
+
+A disposable native WKWebView harness with the desktop `tauri://localhost` origin reproduced a response connection closing after approximately 61 seconds while a long generation-style HTTP request remained pending. In the same WebView, short start/poll requests completed a simulated preview after about 71 seconds, beyond the failing request’s cutoff. The harness uses a local fake provider rather than making a paid model request.

@@ -9,7 +9,7 @@ import { redactSecrets, runProcess, isSensitivePath } from '../../workspace/src/
 
 export type ProviderId = 'codex' | 'claude';
 export type ProviderStatus = {
-  id: ProviderId; available: boolean; authentication: 'authenticated' | 'missing' | 'unknown'; message: string; version?: string;
+  id: ProviderId; available: boolean; authentication: 'authenticated' | 'missing' | 'unknown'; message: string; version?: string; loginCommand?: string;
 };
 export type AgentEvent = {
   type: 'session' | 'message' | 'tool_request' | 'tool_result' | 'file_diff' | 'terminal' | 'usage' | 'warning' | 'result';
@@ -49,6 +49,14 @@ export async function providerExecutable(id: ProviderId): Promise<string> {
   return executable;
 }
 
+/** A copyable command for the bundled CLI, including paths containing shell metacharacters. */
+export function providerLoginCommand(id: ProviderId, executable: string, platform = process.platform): string {
+  const quoted = platform === 'win32'
+    ? `& '${executable.replaceAll("'", "''")}'`
+    : `'${executable.replaceAll("'", "'\\''")}'`;
+  return `${quoted} ${id === 'codex' ? 'login' : 'auth login'}`;
+}
+
 export async function checkAvailability(id: ProviderId): Promise<ProviderStatus> {
   try {
     const executable = await providerExecutable(id);
@@ -60,7 +68,7 @@ export async function checkAvailability(id: ProviderId): Promise<ProviderStatus>
       try { authenticated = (JSON.parse(auth.stdout) as { loggedIn?: boolean }).loggedIn === true; } catch { /* Unsupported status shape remains unknown. */ }
     } else authenticated = auth.exitCode === 0 && /logged in/i.test(auth.stdout + auth.stderr);
     return {
-      id, available: true, version: version.stdout.trim() || version.stderr.trim(),
+      id, available: true, version: version.stdout.trim() || version.stderr.trim(), loginCommand: providerLoginCommand(id, executable),
       authentication: authenticated ? 'authenticated' : auth.exitCode === 1 ? 'missing' : 'unknown',
       message: authenticated
         ? 'Official CLI reports a local login. Model access, subscription entitlement, and remaining budget are verified only by a requested run.'

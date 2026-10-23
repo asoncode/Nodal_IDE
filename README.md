@@ -123,6 +123,10 @@ You only need to sign in to the providers you plan to use. Nodal doesn't collect
 
 The **Feature Builder**, **Parallel Fullstack**, and **Bug Hunt** templates include agent nodes. Set their instructions, choose a model if needed, and review their permissions before running. The **Generate** feature can also use Claude to propose a workflow; you review the preview before applying it.
 
+Open **Generate** to check your Claude/Codex CLI account status in the [generation dialog](docs/screenshots/generation.png). Nodal reuses existing official CLI logins; there is no separate Nodal account connection. If sign-in is missing, run the displayed bundled-CLI login command in Terminal, complete the official sign-in flow, then click **Refresh**.
+
+Preview generation runs in the background with progress and cancellation; closing its dialog cancels an unfinished preview and preserves your prompt.
+
 ## Chat with an agent
 
 Click the **Agent chat** speech-bubble icon in the activity bar or top toolbar. Choose Claude or Codex, an optional model, and an access level, then type your message and click **Send & approve**. Each send approves one provider turn using the access shown in the sidebar. Nodal uses your existing official CLI login.

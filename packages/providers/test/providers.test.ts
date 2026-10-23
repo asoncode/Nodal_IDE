@@ -3,7 +3,7 @@ import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ThreadEvent } from '@openai/codex-sdk';
-import { claudeOptions, normalizeCodexEvent, normalizeClaudeMessage, runProvider, validateToolPath } from '../src/index.js';
+import { claudeOptions, normalizeCodexEvent, normalizeClaudeMessage, providerLoginCommand, runProvider, validateToolPath } from '../src/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 const { startThread, runStreamed, query } = vi.hoisted(() => ({
@@ -17,6 +17,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query }));
 afterEach(() => vi.clearAllMocks());
 
 describe('provider policy and event adapters (SDK mocks, no network)', () => {
+  it('quotes bundled login commands without expanding shell metacharacters', () => {
+    expect(providerLoginCommand('codex', "/Applications/Nodal's $app/codex", 'darwin')).toBe("'/Applications/Nodal'\\''s $app/codex' login");
+    expect(providerLoginCommand('claude', 'C:\\Nodal App\\claude.exe', 'win32')).toBe("& 'C:\\Nodal App\\claude.exe' auth login");
+  });
   it('uses restrictive Codex defaults and preserves real final usage shape', async () => {
     startThread.mockReturnValue({ runStreamed });
     runStreamed.mockResolvedValue({ events: (async function* (): AsyncGenerator<ThreadEvent> {
