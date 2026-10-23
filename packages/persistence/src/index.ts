@@ -77,6 +77,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS improvement_proposals(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), graph_id TEXT NOT NULL, rule_key TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(project_id, rule_key));
       CREATE TABLE IF NOT EXISTS lessons(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), json TEXT NOT NULL);
       INSERT OR IGNORE INTO migrations VALUES(6,datetime('now'));
+      CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, json TEXT NOT NULL);
+      INSERT OR IGNORE INTO migrations VALUES(7,datetime('now'));
     `));
   }
   transaction<T>(action: () => T): T {
@@ -163,6 +165,8 @@ export class Store {
     const rows = this.db.prepare('SELECT json FROM graph_revisions WHERE graph_id=? ORDER BY created_at DESC').all(graphId) as { json: string }[];
     return rows.map(row => JSON.parse(row.json) as Graph).find(graph => graph.revision === revision);
   }
+  setting<T>(key: string): T | undefined { return this.one<T>('SELECT json FROM settings WHERE key=?', key); }
+  saveSetting(key: string, value: unknown): void { this.db.prepare('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET json=excluded.json').run(key, json(value)); }
   saveHandoff(runId: string, handoff: VerifiedHandoff): void { this.db.prepare('INSERT INTO handoffs VALUES(?,?,?,?) ON CONFLICT(run_id,attempt_id,name) DO UPDATE SET json=excluded.json').run(runId, handoff.attemptId, handoff.name, json(handoff)); }
   handoffs(runId: string): VerifiedHandoff[] { this.run(runId); return this.many('SELECT json FROM handoffs WHERE run_id=? ORDER BY rowid', runId); }
   saveGraph(projectId: string, graph: Graph): Graph {

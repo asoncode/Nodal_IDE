@@ -397,3 +397,6 @@ input[type=checkbox], input[type=range] { accent-color: var(--gold); }
 .proposal-warning { color: var(--gold) !important; }
 .lesson { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; line-height: 1.5; color: var(--fg-muted); }
 .lesson span { flex: 1; }
+.library-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.library-parameter { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; align-items: center; }
+.library-parameter code { font: 11px var(--mono); color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

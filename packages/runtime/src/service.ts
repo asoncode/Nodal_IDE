@@ -16,6 +16,7 @@ import { upstreamContext } from './context.js';
 import { runTool, type ToolOutput } from './tools.js';
 import { playbookGraph, type RoleNode } from '../../core/src/playbook.js';
 import { Supervisor, applyChanges, compareProposal, proposeImprovements, runSummary, workflowMetrics } from './orchestrator.js';
+import { LIBRARY_KINDS, detectDefaults, libraryLocation, listLibrary, materialize, parameterCandidates, parameterize, saveToLibrary, slugify, type LibraryItem } from './library.js';
 import { TerminalRuntime } from './terminals.js';
 import type { GenerationResult, GenerationSnapshot } from '../../shared/src/generation.js';
 import { PlanningOptionsSchema, TeamPlanSchema, type PlanningOptions } from '../../shared/src/team.js';
@@ -95,6 +96,13 @@ const requestSchemas = {
   workflowInsights: projectParams.extend({ graphId: id }),
   applyProposal: projectParams.extend({ proposalId: id }), dismissProposal: projectParams.extend({ proposalId: id }), revertProposal: projectParams.extend({ proposalId: id }),
   lessons: projectParams,
+  libraryInfo: z.object({}).strict(),
+  setLibraryLocation: z.object({ path: z.string().min(1).max(4096) }).strict(),
+  libraryCandidates: projectParams.extend({ graph: GraphSchema }),
+  exportToLibrary: projectParams.extend({ kind: z.enum(LIBRARY_KINDS), name: z.string().trim().min(1).max(200), changelog: z.string().max(4000).default(''), graph: GraphSchema.optional(), roleId: id.optional(), lessonId: id.optional(),
+    parameters: z.array(z.object({ name: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]{0,40}$/), kind: z.enum(['path', 'command']), description: z.string().max(300).default(''), value: z.string().trim().min(1).max(500) }).strict()).max(30).default([]) }),
+  previewImport: projectParams.extend({ kind: z.enum(LIBRARY_KINDS), slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/), version: z.number().int().min(1), bindings: z.record(z.string(), z.string().max(500)).optional() }),
+  importToProject: projectParams.extend({ kind: z.enum(['role', 'lesson']), slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/), version: z.number().int().min(1), bindings: z.record(z.string(), z.string().max(500)).default({}) }),
   saveLesson: projectParams.extend({ lessonId: id.optional(), text: z.string().trim().min(1).max(2000) }),
   deleteLesson: projectParams.extend({ lessonId: id }),
   createChat: projectParams.extend({ provider: z.enum(['claude', 'codex']), model: z.string().trim().min(1).max(200).optional(), permission: z.enum(['read-only', 'scoped-edit']).default('read-only'), context: z.object({ graph: GraphSchema, nodeId: id, runId: id.optional() }).strict().optional() }),
@@ -206,6 +214,19 @@ export class NodalService {
       case 'dismissProposal': { const proposal = this.store.proposal(projectId, params.proposalId as string); if (proposal.status !== 'open') throw new Error('Only open proposals can be dismissed.'); proposal.status = 'dismissed'; this.store.updateProposal(proposal); return proposal; }
       case 'revertProposal': return this.revertProposal(projectId, params.proposalId as string);
       case 'lessons': return this.store.lessons(projectId);
+      case 'libraryInfo': { const location = this.libraryPath(); const { items, errors } = await listLibrary(location); return { location, items: items.map(({ content: _content, ...item }) => item), errors }; }
+      case 'setLibraryLocation': { const location = libraryLocation(params.path as string); this.store.saveSetting('libraryLocation', location); return { location }; }
+      case 'libraryCandidates': return parameterCandidates(params.graph as Graph);
+      case 'exportToLibrary': return this.exportToLibrary(projectId, params as never);
+      case 'previewImport': return this.previewImport(projectId, params.kind as LibraryItem['kind'], params.slug as string, params.version as number, params.bindings as Record<string, string> | undefined);
+      case 'importToProject': {
+        const preview = await this.previewImport(projectId, params.kind as LibraryItem['kind'], params.slug as string, params.version as number, params.bindings as Record<string, string>);
+        if (!preview.result) throw new Error(`Set values for: ${preview.missing.join(', ')}.`);
+        const now = new Date().toISOString();
+        if (preview.result.kind === 'role') return this.store.saveRole(projectId, validateRole(preview.result.role));
+        if (preview.result.kind === 'lesson') return this.store.saveLesson({ id: randomUUID(), projectId, text: preview.result.text, source: 'user', createdAt: now, updatedAt: now });
+        throw new Error('Apply workflows to the canvas from the preview.');
+      }
       case 'saveLesson': {
         const existing = params.lessonId ? this.store.lessons(projectId).find(lesson => lesson.id === params.lessonId) : undefined;
         if (params.lessonId && !existing) throw new Error('Lesson not found.');
@@ -446,6 +467,41 @@ export class NodalService {
     for (const handoff of handoffs) { this.store.saveHandoff(ctx.runId, handoff); await ctx.emit('handoff.verified', handoff); }
     return { status: succeeded ? 'succeeded' : 'failed', error: succeeded ? undefined : 'Command did not pass its required exit status.', output: { ...output, worktree, head: committed.head }, artifacts: [...contextArtifacts, { id: artifactId, runId: ctx.runId, attemptId: ctx.attempt.id, kind: 'diff', path: artifactPath, contentHash: digest(redact(diff)), metadata: { nodeId: node.id }, createdAt: new Date().toISOString() }] };
   }
+  private libraryPath() { return libraryLocation(this.store.setting<string>('libraryLocation')); }
+  /** Saves the next version of a workflow, role, or lesson, replacing project-specific values with declared parameters. */
+  private async exportToLibrary(projectId: string, input: { kind: LibraryItem['kind']; name: string; changelog: string; graph?: Graph; roleId?: string; lessonId?: string; parameters: { name: string; kind: 'path' | 'command'; description: string; value: string }[] }) {
+    const project = this.store.project(projectId);
+    let content: unknown; let slug = slugify(input.name);
+    if (input.kind === 'workflow') {
+      if (!input.graph) throw new Error('Choose a workflow to save.');
+      const { id: _id, revision: _revision, origin, ...rest } = input.graph;
+      if (origin) slug = origin.library;
+      content = parameterize(rest, input.parameters);
+    } else if (input.kind === 'role') {
+      const role = this.store.roles(projectId).find(item => item.id === input.roleId);
+      if (!role) throw new Error('Choose a saved project role.');
+      content = parameterize(role, input.parameters);
+    } else {
+      const lesson = this.store.lessons(projectId).find(item => item.id === input.lessonId);
+      if (!lesson) throw new Error('Choose a project lesson.');
+      content = { text: lesson.text };
+    }
+    return saveToLibrary(this.libraryPath(), { kind: input.kind, slug, name: input.name, origin: { project: project.name, exportedAt: new Date().toISOString() }, changelog: input.changelog,
+      parameters: input.parameters.map(({ value, ...parameter }) => ({ ...parameter, default: value })), content });
+  }
+  /** Binds parameters with the given values or detected defaults and validates the result. Nothing is saved or run. */
+  private async previewImport(projectId: string, kind: LibraryItem['kind'], slug: string, version: number, given?: Record<string, string>) {
+    const project = this.store.project(projectId);
+    const { items } = await listLibrary(this.libraryPath());
+    const item = items.find(entry => entry.kind === kind && entry.slug === slug && entry.version === version);
+    if (!item) throw new Error('That library item version was not found.');
+    const files = (await workspace.listFiles(project.root).catch(() => [])).map(file => file.path);
+    const bindings = { ...await detectDefaults(project.root, item.parameters, files), ...(given ?? {}) };
+    const missing = item.parameters.filter(parameter => !bindings[parameter.name]?.trim()).map(parameter => parameter.name);
+    const { content: _content, ...meta } = item;
+    return { item: meta, bindings, missing, result: missing.length ? undefined : materialize(item, bindings) };
+  }
+
   /** Metrics for a saved workflow, new rule-based proposals, and outcomes of applied ones. */
   private insights(projectId: string, graphId: string) {
     const graph = this.store.graphs(projectId).find(item => item.id === graphId);

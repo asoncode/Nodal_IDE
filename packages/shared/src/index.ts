@@ -142,6 +142,8 @@ export const GraphSchema = z.object({
     /** Resume an agent's provider session on quality-loop retries. Off unless enabled after comparison runs. */
     resumeOnRetry: z.boolean().optional(),
   }).strict().default({ maxConcurrency: 3, maxTotalAttempts: 100, timeoutMs: 3_600_000 }),
+  /** Library provenance for an imported workflow: the item, its version, and the parameter values bound at import. */
+  origin: z.object({ library: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/), version: z.number().int().min(1), bindings: z.record(z.string(), z.string().max(500)).default({}) }).strict().optional(),
 }).strict();
 export type Graph = z.infer<typeof GraphSchema>;
 export const ArtifactSchema = z.object({
